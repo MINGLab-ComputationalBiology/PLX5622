@@ -1,0 +1,915 @@
+---
+bibliography: references.bib
+---
+
+# Differential Expression Analysis Between Groups
+
+## pseudobulk
+
+### Construct pseudobulk
+
+```{r}
+
+library(SingleCellExperiment)
+library(scuttle)
+library(Seurat)
+
+setwd("/home/mouse_ad/002SC")
+dir.create("004Seurat_out/004DEGs")
+dir.create("004Seurat_out/004DEGs/DESeq")
+dir.create("004Seurat_out/004DEGs/DESeq/anno.L1")
+dir.create("004Seurat_out/004DEGs/DESeq/anno.L2")
+dir.create("004Seurat_out/004DEGs/DESeq/anno.L3")
+
+sobj <- readRDS("004Seurat_out/002cell_type_anno/sobj.rds")
+
+sobj.count <- CreateSeuratObject(sobj@assays$RNA@counts, 
+                                 meta.data=sobj@meta.data)
+
+sce <- as.SingleCellExperiment(sobj.count) 
+
+for (LEVEL in c("anno.L1", "anno.L2", "anno.L3")) {
+  if (F) {
+    LEVEL <- "anno.L3"
+  }
+  summed <- scuttle::aggregateAcrossCells(sce,
+             id=colData(sce)[,c(LEVEL, "orig.ident")])
+
+  assays(summed)$counts <- round(assays(summed)$counts)
+  saveRDS(summed, paste0("004Seurat_out/004DEGs/DESeq/", LEVEL, "/summed.", LEVEL, ".rds"))
+}
+
+```
+
+### DESeq2 Differential Expression Analysis
+
+```{r}
+
+library(DESeq2)
+
+for (CT in unique(summed.L1$anno.L1)) {
+  summed.sub <- subset(summed.L1, ,anno.L1==CT)
+  summed.sub$treatment <- factor(summed.sub$treatment, 
+                                 levels=c( "WT_ctrl", "AD_5622", "AD_ctrl"))
+  
+  dds <- DESeqDataSet(summed.sub, ~ treatment + batch)
+  
+  dds <- DESeq(dds)
+  
+  saveRDS(dds, paste0("004Seurat_out/004DEGs/DESeq/anno.L1/", CT, ".dds.rds"))
+}
+
+for (CT in unique(summed.L2$anno.L2)) {
+  summed.sub <- subset(summed.L2, ,anno.L2 == CT)
+  summed.sub$treatment <- factor(summed.sub$treatment, 
+                                 levels=c( "WT_ctrl", "AD_5622", "AD_ctrl"))
+  
+  dds <- DESeqDataSet(summed.sub, ~ treatment + batch)
+  
+  dds <- DESeq(dds)
+  
+  saveRDS(dds, paste0("004Seurat_out/004DEGs/DESeq/anno.L2/", CT, ".dds.rds"))
+}
+
+```
+
+### Organize DESeq2 Results
+
+1. sn DEGs table
+2. rescued sn DEGs table. 
+
+```{r}
+library(DESeq2)
+library(ggrepel)
+library(EnhancedVolcano)
+
+filt.res <- function(res) {
+  res <- na.omit(res)
+  res <- res[order(res$padj),]
+  res <- subset(res, padj < 0.05 & baseMean > 10)
+  return(data.frame(res))
+}
+
+sobj.meta <- read.csv("../002SC/004Seurat_out/002cell_type_anno/sobj.meta.csv", row.names=1)
+
+
+# Generate merged table
+
+for (LEVEL in c("anno.L1", "anno.L2")) {
+  # LEVEL <- "anno.L2"
+  CT.vec <- unique(sobj.meta[[LEVEL]])
+  df.list <- list()
+  n <- 1
+  for (CT in CT.vec) {
+
+    dds.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", 
+                       LEVEL, "/",
+                       CT, ".dds.rds")
+    dds <- readRDS(dds.path)
+    for (CP in c("AD_5622_vs_AD_ctrl", "AD_ctrl_vs_WT_ctrl")) {
+      S1 <- strsplit(CP, "_vs_")[[1]][1]
+      S2 <- strsplit(CP, "_vs_")[[1]][2]
+      df <- results(dds, contrast = c("treatment", S1, S2))
+      # Unfiltered DEGs table, useful for volcano plots
+      df <- na.omit(df)
+      df <- df[order(df$padj),]
+      df$gene <- row.names(df)
+      df$direction <- ifelse(df$log2FoldChange > 0, yes = "up", no = "down")
+      write.csv(df, paste0("../002SC/004Seurat_out/004DEGs/DESeq/", 
+                            LEVEL, "/sn.DEGs.DESeq.", LEVEL, ".", CT, ".", CP, ".raw.csv"))
+      df <- subset(df, padj < 0.05 & baseMean > 10)
+      if (nrow(df) > 0) {
+        df$comparison <- CP
+        df$cell_type <- CT
+        df.list[[n]] <- df
+        n <- n + 1
+      }
+    }
+  }
+  
+  df.merged <- Reduce(rbind, df.list)
+  
+  write.csv(df.merged, paste0("../002SC/004Seurat_out/004DEGs/DESeq/", 
+                              LEVEL, "/sn.DEGs.DESeq.", LEVEL, ".csv"))
+  # anno.L1/sn.DEGs.DESeq.anno.L1.csv
+  # anno.L2/sn.DEGs.DESeq.anno.L2.csv
+}
+
+# rescued genes
+library(reshape2)
+library(dplyr)
+
+for (LEVEL in c("anno.L1", "anno.L2")) {
+  in.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", 
+                              LEVEL, "/sn.DEGs.DESeq.", LEVEL, ".csv")
+  df.merged <- read.csv(in.path, row.names=1)
+  df.merged.wide <- dcast(gene+cell_type~comparison, value.var = "direction", data=df.merged)
+  df.rescued <- na.omit(df.merged.wide)
+  df.rescued <- subset(df.rescued, AD_5622_vs_AD_ctrl != AD_ctrl_vs_WT_ctrl)
+  out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", 
+                              LEVEL, "/sn.DEGs.DESeq.", LEVEL, ".rescued.csv")
+  write.csv(df.rescued, out.path)
+  # anno.L1/sn.DEGs.DESeq.anno.L1.rescued.csv
+  # anno.L2/sn.DEGs.DESeq.anno.L2.rescued.csv
+}
+
+# GABA_0.rescued.gl <- subset(df.rescued, cell_type== "GABA_0")$gene
+# GABA_0.rescued.df <- subset(df.merged, gene %in% GABA_0.rescued.gl)
+# GABA_0.rescued.df <- GABA_0.rescued.df %>% arrange(gene, comparison)
+```
+
+### Volcano plot: GABA and GABA_0
+
+```{r}
+library(DESeq2)
+library(ggrepel)
+library(EnhancedVolcano)
+
+for (LEVEL in c("anno.L1", "anno.L2")) {
+  if (LEVEL == "anno.L1") {
+    CT <- "GABA"
+  } else {
+    CT <- "GABA_0"
+  }
+  for (CP in c("AD_5622_vs_AD_ctrl", "AD_ctrl_vs_WT_ctrl")) {
+    in.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                      "/sn.DEGs.DESeq.", LEVEL, 
+                      ".", CT, ".", CP, ".raw.csv")
+    
+    DEGs.df <- read.csv(in.path, row.names=1)
+    
+    DEGs.df.sub <- subset(DEGs.df, baseMean > 10)
+    
+    p <- EnhancedVolcano(DEGs.df.sub,
+                  lab = DEGs.df.sub$gene,
+                  x = 'log2FoldChange',
+                  y = 'padj', 
+                  xlab = "Log2 (Fold Change)", 
+                  ylab="-Log10 (Adjusted p-value)", 
+                  title = paste0(CT, " DEGs (", CP, ")"),
+                  pCutoff = 0.05,
+                  FCcutoff = 0.5,
+                  pointSize = 3.0,
+                  labSize = 5, 
+                  subtitle = "", 
+                  drawConnectors = T,
+                  axisLabSize = , 
+                  arrowheads = F, 
+                  titleLabSize = 20, 
+                  legendPosition = "top", 
+                  legendLabSize = 16)
+    
+    out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                      "/sn.DEGs.DESeq.", LEVEL, 
+                      ".", CT, ".", CP, ".vocano.png")
+    ggsave(out.path, p, width=10, height=10)
+  }
+}
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/anno.L1/sn.DEGs.DESeq.anno.L1.GABA.AD_5622_vs_AD_ctrl.vocano.png")
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/anno.L1/sn.DEGs.DESeq.anno.L1.GABA.AD_ctrl_vs_WT_ctrl.vocano.png")
+
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/sn.DEGs.DESeq.anno.L2.GABA_0.AD_5622_vs_AD_ctrl.vocano.png")
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/sn.DEGs.DESeq.anno.L2.GABA_0.AD_ctrl_vs_WT_ctrl.vocano.png")
+```
+
+### GSEA Analysis
+
+#### Exploration 1: Run code
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(c("clusterProfiler", "fgsea", "msigdbr", "org.Hs.eg.db", "ggplot2"))
+library(clusterProfiler)
+library(fgsea)
+library(msigdbr) # 
+library(ggplot2)
+
+# Sort by log2FoldChange (descending)
+LEVEL <- "anno.L1"
+CT <- "GABA"
+CP <- "AD_5622_vs_AD_ctrl"
+in.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                  "/sn.DEGs.DESeq.", LEVEL, 
+                  ".", CT, ".", CP, ".raw.csv")
+
+res_df <- read.csv(in.path, row.names=1)
+
+gene_list <- res_df$log2FoldChange
+names(gene_list) <- res_df$gene
+gene_list <- sort(gene_list, decreasing = TRUE) 
+head(gene_list) 
+
+# Get “Hallmark” gene sets (species adjustable)
+# H: Hallmark,  C5: GO, C7: immune
+msigdbr_species <- "Mus musculus" # or "Mus musculus"
+m_df <- msigdbr(species = msigdbr_species, collection = "H") 
+
+# Convert to GSEA input format
+gene_sets <- split(m_df$gene_symbol, m_df$gs_name) 
+length(gene_sets) # View significant enrichment results
+
+# 执行GSEA
+gsea_res1 <- GSEA(
+  geneList = gene_list,     
+  exponent = 10,             
+  minGSSize = 5,           
+  maxGSSize = 500,          
+  pvalueCutoff = 0.05,      #
+  pAdjustMethod = "BH",     
+  TERM2GENE = data.frame(term = m_df$gs_name, gene = m_df$gene_symbol) # 
+)
+
+head(gsea_res@result, 10)
+
+```
+
+
+#### Exploration 2: Database choice is important
+
+```{r}
+
+# Adjust parameters
+# minGSSize: 5, pvalueCutoff: 0.1
+msigdbr_species <- "Mus musculus" 
+m_df <- msigdbr(species = msigdbr_species, collection = "H") 
+gene_sets <- split(m_df$gene_symbol, m_df$gs_name) 
+# GSEA
+gsea_res2 <- GSEA(
+  geneList = gene_list,     
+  exponent = 1,            
+  minGSSize = 5,           
+  maxGSSize = 500,          
+  pvalueCutoff = 0.1,      
+  pAdjustMethod = "BH",    
+  TERM2GENE = data.frame(term = m_df$gs_name, gene = m_df$gene_symbol) 
+)
+
+
+# Change dataset
+# Get mouse C5 GO biological process gene sets
+mouse_go_bp <- msigdbr(species = "Mus musculus", collection = "C5", subcategory = "GO:BP")
+gene_sets <- split(mouse_go_bp$gene_symbol, mouse_go_bp$gs_name)
+
+gsea_res3 <- GSEA(
+  geneList = gene_list,     
+  exponent = 1,            
+  minGSSize = 5,           
+  maxGSSize = 500,         
+  pvalueCutoff = 0.1,      
+  pAdjustMethod = "BH",    
+  TERM2GENE = data.frame(term = mouse_go_bp$gs_name, 
+                         gene = mouse_go_bp$gene_symbol) 
+)
+
+out.dir <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, "/GSEA")
+dir.create(out.dir)
+out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                  "/GSEA/sn.DEGs.DESeq.", LEVEL, 
+                  ".", CT, ".", CP, ".GO_BP.csv")
+write.csv(gsea_res3, out.path)
+```
+
+#### Actual Analysis
+
+```{r}
+library(clusterProfiler)
+library(fgsea)
+library(msigdbr)
+library(ggplot2)
+
+dir.create("../002SC/004Seurat_out/004DEGs/DESeq/anno.L1/GSEA")
+dir.create("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/GSEA")
+
+sobj.meta <- read.csv("../002SC/004Seurat_out/002cell_type_anno/sobj.meta.csv", row.names=1)
+
+comps <- c("AD_5622_vs_AD_ctrl", "AD_ctrl_vs_WT_ctrl")
+interested.celltypes <- c("Glu_5", "GABA_1", "GABA", "GABA_0", "Glu", "Oligo", "Glu_0", "Glu_3", "Micro", "Astro", "Endo-Others", "OPC") 
+
+for (CT in interested.celltypes) {
+  if (CT %in% unique(sobj.meta$anno.L1)) {
+    LEVEL <- "anno.L1"
+  } else {
+    LEVEL <- "anno.L2"
+  }
+  for (CP in comps) {
+    if (F) {
+      # EDA
+      CT <- "GABA"
+      LEVEL <- "anno.L1"
+      CP <- "AD_5622_vs_AD_ctrl"
+    }
+    in.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                      "/sn.DEGs.DESeq.", LEVEL, 
+                      ".", CT, ".", CP, ".raw.csv")
+    
+    res_df <- read.csv(in.path, row.names=1)
+    
+    res_df$RANK <- rank(-res_df$baseMean)
+    
+    res_df <- subset(res_df, RANK <= 12000)
+    
+    gene_list <- res_df$log2FoldChange
+    names(gene_list) <- res_df$gene
+    gene_list <- sort(gene_list, decreasing = TRUE) 
+    
+    for (COLLECT in c("H", "C2", "C5")) {
+      if (F) {
+        # EDA
+        COLLECT <- "C2" 
+      }
+      m_df <- msigdbr(species = "Mus musculus", collection = COLLECT)
+      
+      gsea_res4 <- GSEA(
+        geneList = gene_list,     
+        exponent = 1,             
+        minGSSize = 5,           
+        maxGSSize = 500,          
+        pvalueCutoff = 0.1,      
+        pAdjustMethod = "BH",     
+        TERM2GENE = data.frame(term = m_df$gs_name, 
+                               gene = m_df$gene_symbol)
+      )
+      out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                        "/GSEA/sn.DEGs.DESeq.", LEVEL, 
+                        ".", CT, ".", CP, ".", COLLECT, ".rds")
+      saveRDS(gsea_res4, out.path)
+    }
+  }
+}
+
+
+```
+
+
+#### GSEA Result Visualization
+
+##### merge LEVEL1 GSEA results
+
+Generate an overview result similar to Metascape heatmaps:
+
+- Enrichment patterns across comparisons
+- Prefer representative pathways
+
+```{r}
+
+meta.sn <- read.csv("../002SC/004Seurat_out/002cell_type_anno/sobj.meta.csv", row.names=1)
+
+
+COLLECT <- "C5"
+
+for (LEVEL in c("anno.L1", "anno.L2")) {
+  # LEVEL <- "anno.L2"
+  CT.vec <- unique(meta.sn[[LEVEL]])
+  
+  if (LEVEL=="anno.L2") {
+    CT.vec <- c("Glu_3", "Glu_5", "GABA_0", "GABA_1")
+  }
+  
+  df.list <- list()
+  n <- 1
+  for (CP in c("AD_5622_vs_AD_ctrl", "AD_ctrl_vs_WT_ctrl")) {
+    for (CT in CT.vec) {
+      if (F) {
+        CT <- "GABA"
+      }
+      out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                      "/GSEA/sn.DEGs.DESeq.", LEVEL, 
+                      ".", CT, ".", CP, ".", COLLECT, ".rds")
+      gsea_result <- readRDS(out.path)
+      df <- gsea_result@result # [ c("ID", "NES", "qvalue", "core_enrichment")]
+      
+      if (nrow(df) > 0) {
+        df.cols <- colnames(df)
+        df$cell_type <- CT
+        df$comparison <- CP
+        df <- df[, c("cell_type", "comparison", df.cols)]
+        df.list[[n]] <- df
+        n <- n + 1
+      }
+      # p <- gseaplot2(gsea_result, 1:5, pvalue_table = T, pvalue_table_columns = "pvalue")
+      # ggsave("")
+    }
+  }
+  
+  df.merged <- Reduce(rbind, df.list)
+  
+  df.merged <- df.merged[order(df.merged$cell_type, 
+                     df.merged$comparison, 
+                     df.merged$qvalue), ]
+  
+  out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                     "/GSEA/sn.DEGs.DESeq.", LEVEL, ".merged.", COLLECT, ".csv")
+  write.csv(df.merged, out.path)
+}
+
+# out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+#                 "/GSEA/sn.DEGs.DESeq.", "anno.L2", 
+#                 ".", "GABA_1", ".", "AD_5622_vs_AD_ctrl", ".", COLLECT, ".rds")
+# gsea_result <- readRDS(out.path)
+
+```
+
+##### Explore merged data
+
+```{r}
+
+head(sort(table(df.merged$ID), decreasing = T), 10)
+
+# GOBP_AEROBIC_RESPIRATION 2
+# GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT 2
+# GOBP_ATP_SYNTHESIS_COUPLED_ELECTRON_TRANSPORT 2
+
+subset(df.merged, ID == "GOBP_AEROBIC_RESPIRATION")
+subset(df.merged, ID == "GOBP_ATP_SYNTHESIS_COUPLED_ELECTRON_TRANSPORT") # 情况和GOBP_AEROBIC_RESPIRATION类似。
+
+subset(df.merged, ID == "GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT") # 在GABA rescued。
+#                                            cell_type         comparison                                        ID                               Description setSize
+# GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT       GABA AD_5622_vs_AD_ctrl GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT      17
+# GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT1      GABA AD_ctrl_vs_WT_ctrl GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT      17
+#                                            enrichmentScore       NES       pvalue   p.adjust     qvalue rank                  leading_edge
+# GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT         0.799437  2.226844 7.280948e-05 0.02112999 0.02051677  463 tags=29%, list=4%, signal=28%
+# GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT1       -0.810331 -2.360443 2.940640e-06 0.01818786 0.01774289  623 tags=35%, list=5%, signal=34%
+#                                                                 core_enrichment
+# GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT          Tfap2b/Gata3/Sema3f/Ret/Nrp1
+# GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT1 Ret/Phactr4/Nrp2/Sema3f/Gata3/Tfap2b
+
+```
+
+##### rescued pathways
+
+```{r}
+library(reshape2)
+
+LEVEL <- "anno.L1"
+COLLECT <- "C5"
+out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                   "/GSEA/sn.DEGs.DESeq.", LEVEL, ".merged.", COLLECT, ".csv")
+
+sn.gsea <- read.csv(out.path, row.names=1)
+  
+df.wide <- dcast(ID+cell_type~comparison, value.var = "NES", data=sn.gsea)
+
+df.wide.sub <- na.omit(df.wide)
+
+# Up-rescued pathways?
+df.wide.sub.up_rescued <- subset(df.wide.sub, FADCtrl_vs_WTCtrl < 0 & PLX5622_vs_FADCtrl > 0)
+```
+
+
+##### 绘制氧化磷酸化gseaplot
+
+```{r}
+
+library(enrichplot)
+
+gsea_result <- readRDS("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/GSEA/sn.DEGs.DESeq.anno.L2.GABA_1.AD_ctrl_vs_WT_ctrl.C5.rds")
+View(gsea_result@result)
+
+# Plot oxidative phosphorylation
+interested.celltypes <- c("Glu_5", "GABA_1", "GABA", "GABA_0", "Glu", "Oligo", "Glu_0", "Glu_3")
+
+CT <- "GABA"
+LEVEL <- "anno.L1"
+CP <- "AD_5622_vs_AD_ctrl"
+COLLECT <- "C5"
+out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                  "/GSEA/sn.DEGs.DESeq.", LEVEL, 
+                  ".", CT, ".", CP, ".", COLLECT, ".rds")
+
+gsea_result.GABA <- readRDS(out.path)
+
+View(gsea_result@result)
+View(subset(gsea_result@result, qvalue < 0.05 & NES > 0)) # GOBP_OXIDATIVE_PHOSPHORYLATION
+
+# oxidative phosphorylation
+gseaplot2(gsea_result.GABA, "GOBP_OXIDATIVE_PHOSPHORYLATION",
+          title="GOBP_OXIDATIVE_PHOSPHORYLATION", 
+          pvalue_table = T, pvalue_table_rownames = NULL)
+
+CT <- "Glu"
+
+out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                  "/GSEA/sn.DEGs.DESeq.", LEVEL, 
+                  ".", CT, ".", CP, ".", COLLECT, ".rds")
+
+gsea_result.Glu <- readRDS(out.path)
+gseaplot2(gsea_result.Glu, "GOBP_OXIDATIVE_PHOSPHORYLATION",
+          title="GOBP_OXIDATIVE_PHOSPHORYLATION", 
+          pvalue_table = T, pvalue_table_rownames = NULL)
+
+View(subset(gsea_result@result, qvalue < 0.05 & NES > 0)) 
+
+```
+
+##### Plot GABA differentiation gseaplot
+
+After using gseaplot2 to generate GSEA plots, I want to adjust plot details, but it does not return a standard ggplot object. How can I modify it? Are there alternative functions?
+
+Using gseaplot, which returns a ggplot object, I want to modify segment thickness. Can I directly use ggplot layering, or must I modify the source code?
+
+```{r}
+# Differentiation-related
+library(enrichplot)
+
+LEVEL <- "anno.L1"
+COLLECT <- "C5"
+pathway <- "GOBP_AUTONOMIC_NERVOUS_SYSTEM_DEVELOPMENT"
+
+for (CP  in c("AD_5622_vs_AD_ctrl", "AD_ctrl_vs_WT_ctrl")) {
+  out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                  "/GSEA/sn.DEGs.DESeq.", LEVEL, 
+                  ".", "GABA", ".", CP, ".", COLLECT, ".rds")
+
+  gsea_result <- readRDS(out.path)
+  
+  p1 <- gseaplot(gsea_result, geneSetID = pathway, by = "runningScore")
+  p1@layers$geom_linerange <- NULL
+  p1@layers$geom_line <- NULL
+  pvalue <- round(subset(gsea_result@result, ID==pathway)$p.adjust, 3)
+  
+  p1 <- p1 + ggtitle("GO: Autonomic Nervous System\nDevelopment", 
+                     subtitle = paste0("Adjusted p-value = ", pvalue)) + 
+    geom_linerange(aes(x = x, ymin = ymin, ymax = ymax), 
+                   linewidth = 0.1,  
+                   color = "black") +  
+    geom_line(aes(y=runningScore), color="green", size=0.5) + 
+    theme_nature() + theme(plot.subtitle = element_text(size=8))
+    # theme(axis.title = element_text(size=9, face = "bold"), 
+    #         plot.title = element_text(size=10, face = "bold"),  
+    #         plot.subtitle = element_text(size=8))
+  # p1 <- gseaplot2(gsea_result, pathway, title=pathway, 
+  #           pvalue_table = T, pvalue_table_rownames = NULL)
+  
+  # publish: 
+  ggsave(paste0("../002SC/004Seurat_out/004DEGs/DESeq/GABA_development.", CP, ".gseaplot.png"), p1, width=2.4811, height=2.4174, dpi=300)
+  ggsave(paste0("../002SC/004Seurat_out/004DEGs/DESeq/GABA_development.", CP, ".gseaplot.pdf"), p1, width=2.4811, height=2.4174, device=cairo_pdf)
+}
+
+
+
+
+if (F) {
+  # EDA: 
+  ggsave("../002SC/004Seurat_out/004DEGs/DESeq/GABA_development.PL_vs_AD.gseaplot.png", p1, width=6.15, height=4.28, dpi=300)
+  ggsave("../002SC/004Seurat_out/004DEGs/DESeq/GABA_development.AD_vs_WT.gseaplot.png", p2, width=6.15, height=4.28, dpi=300)
+}
+
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/GABA_development.AD_ctrl_vs_WT_ctrl.gseaplot.png")
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/GABA_development.AD_5622_vs_AD_ctrl.gseaplot.png")
+
+```
+
+##### draw Glu gseaplot
+
+
+```{r}
+library(enrichplot)
+
+LEVEL <- "anno.L1"
+COLLECT <- "C5"
+pathway <- "GOBP_CALCIUM_ION_TRANSMEMBRANE_TRANSPORT"
+
+for (CP  in c("AD_5622_vs_AD_ctrl", "AD_ctrl_vs_WT_ctrl")) {
+  out.path <- paste0("../002SC/004Seurat_out/004DEGs/DESeq/", LEVEL, 
+                  "/GSEA/sn.DEGs.DESeq.", LEVEL, 
+                  ".", "Glu", ".", CP, ".", COLLECT, ".rds")
+
+  gsea_result <- readRDS(out.path)
+  
+  p1 <- gseaplot(gsea_result, geneSetID = pathway, by = "runningScore")
+  p1@layers$geom_linerange <- NULL
+  p1@layers$geom_line <- NULL
+  pvalue <- round(subset(gsea_result@result, ID==pathway)$p.adjust, 3)
+  
+  p1 <- p1 + ggtitle("GO: Calcium Ion Transmembrane\nTransport", 
+                     subtitle = paste0("Adjusted p-value = ", pvalue)) + 
+    geom_linerange(aes(x = x, ymin = ymin, ymax = ymax), 
+                   linewidth = 0.1,  
+                   color = "black") +  
+    geom_line(aes(y=runningScore), color="green", size=0.5) + 
+    theme_nature() + theme(plot.subtitle = element_text(size=8))
+    # theme(axis.title = element_text(size=9, face = "bold"), 
+    #         plot.title = element_text(size=10, face = "bold"),  
+    #         plot.subtitle = element_text(size=8))
+  # p1 <- gseaplot2(gsea_result, pathway, title=pathway, 
+  #           pvalue_table = T, pvalue_table_rownames = NULL)
+  
+  # publish: 
+  ggsave(paste0("../002SC/004Seurat_out/004DEGs/DESeq/Glu_Calcium.", CP, ".gseaplot.png"), p1, width=2.6, height=2.4174, dpi=300)
+  ggsave(paste0("../002SC/004Seurat_out/004DEGs/DESeq/Glu_Calcium.", CP, ".gseaplot.pdf"), p1, width=2.6, height=2.4174, device=cairo_pdf)
+}
+
+```
+
+### Visualization of single-gene differences between groups
+
+After obtaining differential expression results with DESeq2, how can specific genes be visualized?
+
+```{r}
+library(DESeq2)
+dds <- readRDS(paste0("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/",
+                      "GABA_0", ".dds.rds"))
+
+if (F) {
+  # Default DESeq2 plots are not visually appealing
+  plotCounts(dds, gene="Plk2", intgroup="treatment")
+  plotCounts(dds, gene="Tfap2b", intgroup="treatment")
+  plotCounts(dds, gene="Mical2", intgroup="treatment")
+}
+
+# Extract plotting data
+dir.create("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/gene_expr")
+
+p.list <- list()
+for (TG in c("Tfap2b", "Plk2", "Mical2")) {
+  data <- plotCounts(dds, gene=TG, 
+                     intgroup=c("treatment", "batch"), 
+                     returnData = T)
+  
+  data$treatment <- factor(data$treatment, levels=c("WT_ctrl", "AD_ctrl", "AD_5622"), ordered=T)
+  
+  # Draw boxplot
+  expr.max <- max(data$count)
+  expr.max.log <- log10(expr.max)
+  expr.max.exp <- 10^(expr.max.log*1.3)
+  
+  p <- ggplot(data, aes(x=treatment, y=count, fill=treatment)) +
+    geom_boxplot() +
+    geom_line(aes(group=batch)) + 
+    geom_point(aes(color=batch), size=2) +
+    geom_signif(annotations = c("*", "*"), 
+                y_position=c(expr.max.log*1.1, expr.max.log*1.2), 
+                xmin=c(1, 2), xmax=c(2, 3))+ 
+    labs(x="", y="Normalized Count") + 
+    coord_cartesian(ylim=c(NA, expr.max.exp)) + 
+    scale_y_log10() + 
+    ggtitle(TG) +
+    theme_nature()
+  
+  if (TG != "Mical2") {
+    p <- p + theme(legend.position = "none")
+  }
+  p.list[[TG]] <- p
+}
+
+pall <- wrap_plots(p.list, ncol=3)
+
+ggsave("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/gene_expr/Tfap2b_Plk2_Mical2.boxplot.png", pall, width=3.5*2.5, height=3.14, dpi=300)
+
+
+# extract plotting anno.L1
+
+dds <- readRDS(paste0("../002SC/004Seurat_out/004DEGs/DESeq/anno.L1/GABA.dds.rds"))
+
+dir.create("../002SC/004Seurat_out/004DEGs/DESeq/anno.L1/gene_expr")
+
+p.list <- list()
+for (TG in c("Grip1os2", "Rorb", "Tmem132d")) {
+  data <- plotCounts(dds, gene=TG, 
+                     intgroup=c("treatment", "batch"), 
+                     returnData = T)
+  
+  data$treatment <- factor(data$treatment, levels=c("WT_ctrl", "AD_ctrl", "AD_5622"), ordered=T)
+  
+  # draw boxplot
+  expr.max <- max(data$count)
+  expr.max.log <- log10(expr.max)
+  expr.max.exp <- 10^(expr.max.log*1.3)
+  
+  p <- ggplot(data, aes(x=treatment, y=count, fill=treatment)) +
+    geom_boxplot() +
+    geom_line(aes(group=batch)) + 
+    geom_point(aes(color=batch), size=2) +
+    geom_signif(annotations = c("*", "*"), 
+                y_position=c(expr.max.log*1.1, expr.max.log*1.2), 
+                xmin=c(1, 2), xmax=c(2, 3))+ 
+    labs(x="", y="Normalized Count") + 
+    coord_cartesian(ylim=c(NA, expr.max.exp)) + 
+    scale_y_log10() +  
+    ggtitle(TG) +
+    theme_nature()
+  
+  if (TG != "Tmem132d") {
+    p <- p + theme(legend.position = "none")
+  }
+  p.list[[TG]] <- p
+}
+
+pall <- wrap_plots(p.list, ncol=3)
+
+ggsave("../002SC/004Seurat_out/004DEGs/DESeq/anno.L1/gene_expr/Grip1os2_Rorb_Tmem132d.boxplot.png", pall, width=3.5*2.5, height=3.14, dpi=300)
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/anno.L1/gene_expr/Grip1os2_Rorb_Tmem132d.boxplot.png")
+knitr::include_graphics("../002SC/004Seurat_out/004DEGs/DESeq/anno.L2/gene_expr/Tfap2b_Plk2_Mical2.boxplot.png")
+```
+
+## cell level DEGs
+
+### Identify DEGs using Wilcoxon method
+
+```{r}
+sobj <- readRDS("002SC/004Seurat_out/002cell_type_anno/sobj.rds")
+
+for (LEVEL in c("level1", "level2")) {
+  
+  if (LEVEL == "level2") next
+  
+  if (LEVEL == "level1") {
+    cellType_col <- "anno.L1"
+  } else if (LEVEL == "level2") {
+    cellType_col <- "anno.L2"
+  }
+  
+  sobj@meta.data[["treatment_ct"]] <- paste0(sobj@meta.data$treatment, "_",
+                                            sobj@meta.data[[cellType_col]])
+  Idents(sobj) <- "treatment_ct"
+  
+  cellTypes <- unique(sobj@meta.data[[cellType_col]])
+  
+  outdir.sub <- "002SC/004Seurat_out/004DEGs/wilcox"
+  dir.create(outdir.sub)
+  
+  pairs <- list(c("AD_5622", "AD_ctrl"),
+                c("AD_5622", "WT_ctrl"), 
+                c("AD_ctrl", "WT_ctrl"))
+  
+  degs.list <- list()
+  
+  for (pair in pairs){
+    cat("pair: ", pair, "\n")
+    a <- pair[1]
+    b <- pair[2]
+    Comparison <- paste0(a, "_vs_", b)
+    for (ct in cellTypes){
+      cat("ct: ", ct, "\n")
+      Base <- paste0(ct, ".", Comparison, ".csv")
+      aa <- paste0(a, "_", ct)
+      bb <- paste0(b, "_", ct)
+      res <- FindMarkers(sobj, ident.1=aa, ident.2=bb, 
+                         test.use="wilcox", 
+                         logfc.threshold=0, 
+                         min.pct = 0.01, 
+                         return.thresh = 1)
+      degs.list[[paste0(ct, ".", Comparison)]] <- res
+    }
+  }
+  
+  saveRDS(degs.list, "002SC/004Seurat_out/004DEGs/wilcox/sn.DEGs.cell.level2.wilcox.raw.rds")
+  
+  # Merge into sn.DEGs table
+  # Filtering criteria: padj < 0.05, min.pct > 0.1?
+  
+  degs.list.filtered <- list()
+  n <- 1
+  for (pair in pairs){
+    cat("pair: ", pair, "\n")
+    a <- pair[1]
+    b <- pair[2]
+    Comparison <- paste0(a, "_vs_", b)
+    for (ct in cellTypes){
+      cat("ct: ", ct, "\n")
+      df <- degs.list[[paste0(ct, ".", Comparison)]]
+      df$comparison <- Comparison
+      df$celltype <- ct
+      df$gene <- row.names(df)
+      df <- subset(df, p_val_adj < 0.05 & pct.1 > 0.1)
+      degs.list.filtered[[n]] <- df
+      n <- n + 1
+    }
+  }
+  
+  sn.DEGs <- do.call(rbind, degs.list.filtered)
+  row.names(sn.DEGs) <- 1:nrow(sn.DEGs)
+  
+  out.path <- paste0("002SC/004Seurat_out/004DEGs/wilcox/sn.DEGs.cell.", LEVEL, ".wilcox.filtered.csv")
+  
+  write.csv(sn.DEGs, out.path)
+}
+
+```
+
+### Glu investigation
+
+```{r}
+
+df.L1 <- read.csv("../002SC/004Seurat_out/004DEGs/wilcox/sn.DEGs.cell.level1.wilcox.filtered.csv", row.names=1)
+
+# rescued genes
+library(reshape2)
+df.L1.w <- dcast(gene+celltype~comparison, value.var = "avg_log2FC", data=df.L1)
+df.L1.w <- df.L1.w[, c("gene", "celltype", "AD_5622_vs_AD_ctrl", "AD_ctrl_vs_WT_ctrl")]
+df.L1.w <- na.omit(df.L1.w)
+df.L1.rescued <- subset(df.L1.w, AD_5622_vs_AD_ctrl*AD_ctrl_vs_WT_ctrl < 0)
+length(unique(df.L1.rescued$gene))
+# [1] 1450
+write.csv(df.L1.rescued, "../002SC/004Seurat_out/004DEGs/wilcox/sn.DEGs.cell.level1.wilcox.filtered.rescued.csv")
+
+# Remove ambient RNA contamination
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+df.ambient <- subset(cell.DEGs, (!cluster %in% c("Glu", "GABA")) & avg_log2FC > 0.4)
+
+
+# Obtain responsive and rescued genes
+df.L1.glu.respon <- subset(df.L1.glu, comparison == "AD_5622_vs_AD_ctrl" & celltype== "Glu" & abs(avg_log2FC) > 0.1)
+
+length(unique(df.L1.glu.respon$gene)) # 132
+
+df.L1.glu.rescued <- subset(df.L1.rescued, celltype == "Glu" & 
+                              abs(AD_5622_vs_AD_ctrl) > 0.1 & 
+                               !(gene %in% df.ambient$gene))
+
+length(unique(df.L1.glu.rescued$gene))
+# [1] 51
+
+df.L1.glu.rescued2 <- subset(df.L1.rescued, celltype == "Glu" & 
+                               abs(AD_5622_vs_AD_ctrl) > 0.1 & 
+                               abs(AD_ctrl_vs_WT_ctrl) > 0.1 & 
+                               !(gene %in% df.ambient$gene))
+
+length(unique(df.L1.glu.rescued2$gene)) # 14
+
+# Human AD vs WT DEGs
+# The meaning of High_Low: braak score high vs low。
+df.human <- read.csv("C:\\Users\\a8799\\Desktop\\database\\rosmap_PFC_SN\\pseudobulk.FC427DEG.csv")
+
+df.human.glu <- subset(df.human, celltype=="Exc" & 
+                         baseMean > 10 & 
+                         abs(log2FoldChange) > 0.1 & 
+                         padj < 0.05)
+
+# ID conversion
+install.packages("homologene")
+library(homologene)
+out <- homologene(df.human.glu$gene, inTax = 9606, outTax = 10090)
+
+mapping <- out$`10090`
+names(mapping) <- out$`9606`
+
+df.human.glu$gene.mouse <- mapping[df.human.glu$gene]
+human.up <- subset(df.human.glu, log2FoldChange > 0 & !is.na(gene.mouse))
+human.down <- subset(df.human.glu, log2FoldChange < 0 & !is.na(gene.mouse))
+length(unique(human.up$gene.mouse))
+# [1] 341
+length(unique(human.down$gene.mouse))
+# [1] 318
+
+df.L1.glu.rescued.conserved.up <- subset(df.L1.rescued, celltype == "Glu" & 
+                              AD_5622_vs_AD_ctrl > 0.1 & 
+                               (!(gene %in% df.ambient$gene)) & 
+                                gene %in% human.down$gene.mouse)
+
+df.L1.glu.rescued.conserved.down <- subset(df.L1.rescued, celltype == "Glu" & 
+                              AD_5622_vs_AD_ctrl > 0.1 & 
+                               (!(gene %in% df.ambient$gene)) & 
+                                gene %in% human.up$gene.mouse)
+
+```

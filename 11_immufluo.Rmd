@@ -1,0 +1,2647 @@
+# 荧光数据处理
+
+为了证明ST的可靠性，我们取了与空间转录组中相邻的小鼠切片进行免疫荧光染色。获得了GFAP、P2RY12、DAPI（标记细胞核）、硫磺素（标记Aβ）四种物质的空间定位。
+
+## 1 图像处理
+
+主要包括图像配准、导入spots、spots荧光定量三步。
+
+### 图像配准
+
+所谓的图像配准，就是把荧光图像和空间转录组的图像对齐，使得荧光图像上的斑块坐标和空转上spot的坐标是对应的，这样才能得到每个spot附近的荧光强度。使用Fiji plugin "Landmark correspondences"手动进行对齐
+
+### 导入spots
+
+用了QuPath-0.4.3来帮助把spots的位置导入为imageJ中的ROI（region of interested）。
+
+```{r eval=FALSE}
+# QuPath 批处理脚本。
+
+//https://forum.image.sc/t/reading-csv-table-in-qupath/32772/3
+//From @melvingelbard
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.awt.Color; 
+import qupath.lib.objects.PathAnnotationObject;
+import qupath.lib.roi.ROIs
+import qupath.lib.roi.EllipseROI
+
+double spot_diameter_fullres = 112.282074;
+def csvfile = 'C:/Users/a8799/Desktop/project/2022-10-14_mouse_spatial/subprojects/2023-07-05_图像分析/005second_batch/workdir/PLX5622/tissue_positions_list.color.csv' // TO CHANGE
+
+def imageData = getCurrentImageData();
+
+// Create BufferedReader
+def csvReader = new BufferedReader(new FileReader(csvfile));
+
+def plane = ImagePlane.getDefaultPlane();
+
+// Loop through all the rows of the CSV file.
+while ((row = csvReader.readLine()) != null) {
+    def rowContent = row.split(",")
+    String barcode = rowContent[0] as String;
+    // println barcode; 
+    int  in_tissue = rowContent[1] as int;
+    int  array_row = rowContent[2] as int;
+    int  array_col = rowContent[3] as int;
+    double cx = rowContent[4] as double;
+    //cx = cx * scale_factor;
+    double cy = rowContent[5] as double;
+    //cy = cy * scale_factor;
+    int R = rowContent[6] as int;
+    int G = rowContent[7] as int;
+    int B = rowContent[8] as int;
+    
+    // Create annotation
+    if (in_tissue) {
+        double px = cx - spot_diameter_fullres/2;
+        double py = cy - spot_diameter_fullres/2;
+        def roi = new EllipseROI(py, px, spot_diameter_fullres, spot_diameter_fullres, plane); 
+        def annotation = new PathAnnotationObject(roi, PathClass.fromString(barcode)); 
+        annotation.setColor(R, G, B); 
+        annotation.getMeasurementList().putMeasurement("array_row", array_row);
+        annotation.getMeasurementList().putMeasurement("array_col", array_col);
+        annotation.getMeasurementList().putMeasurement("cx", cx);
+        annotation.getMeasurementList().putMeasurement("cy", cy);
+        imageData.getHierarchy().addObject(annotation);
+    }
+}
+```
+
+### spots荧光定量
+
+输入文件准备：`010add_color.r`
+
+结果整理脚本：`010reshape_result.r`
+
+```{r eval=FALSE}
+// 这是Fij的脚本
+
+// 对每个spots进行荧光定量。
+
+sample_names = newArray("WTCtrl", "FADCtrl", "PLX5622");
+sample_codes = newArray("22", "21", "7");
+
+// sample_names = newArray("FADCtrl", "PLX5622");
+// sample_codes = newArray("21", "7");
+
+channels =  newArray("ch00", "ch01", "ch02", "ch03"); 
+
+for (s=0; s < sample_names.length; s++){
+  sample_name = sample_names[s];
+  sample_code = sample_codes[s]; 
+  workdir = "C:/Users/a8799/Desktop/project/2022-10-14_mouse_spatial/subprojects/2023-07-05_image_analysis/002registeration/" + sample_name; 
+  fig_prefix = "Transformed" + sample_code + " 10X.lif_" + sample_code + "_";
+  for (i=0; i<channels.length; i++) {
+    print(i); 
+    channel = channels[i]; 
+    open(workdir + "/" + fig_prefix + channel + ".tif");
+    run("8-bit");
+    //setAutoThreshold("Moments dark no-reset");
+    //run("Threshold...");
+    if (channel == "ch00") {setThreshold(39, 255);}
+    if (channel == "ch01") {setThreshold(17, 255);}
+    if (channel == "ch02") {setThreshold(19, 255);}
+    if (channel == "ch03") {setThreshold(30, 255);}
+    setOption("BlackBackground", true);
+    run("Convert to Mask");
+    run("Scale...", "x=0.2 y=0.2 interpolation=Bilinear average create");
+    saveAs("Jpeg", workdir + "/" + fig_prefix + channel + ".jpg");
+    close();
+    roiManager("Open", workdir + "/RoiSet.zip");
+    run("Set Measurements...", "mean standard median redirect=None decimal=3");
+    roiManager("Multi Measure");
+    saveAs("Results", workdir + "/Results." + channel + ".csv");
+    run("Close");
+    close();
+  }
+}
+```
+
+## 2 图像与空转联合分析
+
+channel与荧光信号的对应关系：
+
+batch1：ch00=Gfap; ch01=P2ry12; ch02=Abeta; ch03=DAPI. 
+
+batch2：ch01=DAPI; ch02=Abeta; ch03=P2ry12; ch04=Gfap. 
+
+分析要点：
+
+1，三种蛋白和mRNA的关联。Aβ、GFAP、P2RY12相关基因。
+
+和Aβ最相关的是Thy1，和GFAP最相关的是Gfap，符合预期。但是和P2RY12最相关的基因却不是P2RY12，而是其他基因。
+
+2，三种蛋白和细胞类型的关联。Aβ、GFAP、P2RY12相关细胞类型。
+
+已经调查了Aβ和不同小胶亚型的关联。Aβ和DAM关联度更高。
+
+GFAP和哪种星形胶质细胞亚型关联更大？P2RY12呢？
+
+## 3 Gfap和P2ry12相关基因
+
+Gfap和P2ry12在荧光染色和空转中的一致性
+
+```{r eval=FALSE}
+
+# P2ry12荧光强度与基因表达的相关系数。
+source("script/load_checkpoint.r")
+
+outdir <- "001Giotto_out/010immunofluorescence"
+if (! dir.exists(outdir)){
+  dir.create(outdir)
+}
+
+expr <- testcombo@expression$cell$rna$normalized@exprMat
+
+library(parallel)
+
+# sample <- "FADCtrl"
+treatments <- c("FADCtrl", "WTCtrl", "PLX5622")
+
+for (i.gene in c("P2ry12", "Gfap")){
+  for (treatment in treatments){
+    for (batch in c("1", "2")){
+      sample <- paste0(treatment, "_", batch)
+      cat("doing sample:", sample, ";", "gene:", i.gene, "\n")
+      if (batch == "1"){
+        save.dir <- file.path(outdir, "measurement")
+        if (i.gene == "P2ry12") {
+          channel <- "ch01"
+        } else if (i.gene == "Gfap"){
+          channel <- "ch00"
+        }
+        infile <- file.path(save.dir, 
+                            treatment, 
+                            paste0("Results.", channel, ".reshaped.csv"))
+      } else if (batch == "2") {
+        save.dir <- file.path(outdir, "batch2")
+        if (i.gene == "P2ry12") {
+          channel <- "ch03"
+        } else if (i.gene == "Gfap"){
+          channel <- "ch04"
+        }
+        infile <- file.path(save.dir, 
+                            treatment, 
+                            paste0("Results.", channel, ".reshaped.csv"))
+      }
+      measure <- read.csv(infile, row.names=1)
+      measure$barcode <- paste0(sample, "-", measure$barcode)
+      
+      row.names(measure) <- measure$barcode
+      barcode.inter <- intersect(measure$barcode, colnames(expr))
+      measure.filt <- measure[barcode.inter, ]
+      immuno.index <- measure.filt$Mean
+      
+      gene.list <- as.vector(row.names(expr))
+      
+      out.list <- mclapply(gene.list, function(gene){
+        gene.expr <- expr[gene, measure.filt$barcode]
+        cor.result <- cor.test(gene.expr, immuno.index, method="spearman", exact = FALSE)
+        e <- cor.result$estimate
+        p <- cor.result$p.value
+        return(c(e, p))
+      }, mc.cores=50)
+      
+      out.df <- data.frame(do.call(rbind, out.list))
+      names(out.df) <- c("rho", "pvalue")
+      out.df$gene <- gene.list
+      out.df$fdr <- p.adjust(out.df$pvalue)
+      out.df <- out.df[order(out.df$pvalue), ]
+      out.df.filt <- out.df[out.df$fdr < 0.05, ]
+      
+      out.path <- file.path(save.dir, treatment, paste0("cor.", i.gene, ".csv"))
+      write.csv(out.df, out.path)
+      out.path <- file.path(save.dir, treatment, paste0("cor.", i.gene, ".filt.csv"))
+      write.csv(out.df.filt, out.path)
+    }
+  }
+}
+
+# measurement/*/cor.ch02.filt.csv
+# batch2/*/cor.ch02.filt.csv
+library(ggplot2)
+library(ggrepel)
+gene <- "P2ry12"
+gene <- "Gfap"
+gene <- "ch02"
+
+df.list <- list()
+n <- 1
+for (treatment in c("WTCtrl", "FADCtrl", "PLX5622")){
+  for (batch in c("1", "2")){
+    if (batch == "1"){
+      in.dir <- "001Giotto_out/010immunofluorescence/measurement"
+      in.file <- file.path(in.dir, treatment, 
+                           paste0("cor.", gene, ".filt.csv"))
+    }
+    else if(batch == "2"){
+      in.dir <- "001Giotto_out/010immunofluorescence/batch2"
+      in.file <- file.path(in.dir, treatment, 
+                           paste0("cor.", gene, ".filt.csv"))
+    }
+    df <- read.csv(in.file)
+    df$treatment <- treatment
+    df$batch <- batch
+    df.list[[n]] <- df
+    n <- n+1
+  }
+}
+
+# 正相关top10
+df.list.top10 <- lapply(df.list, function(x){
+  x <- x[x$rho > 0, ]
+  x$rank <- rank(x$fdr)
+  head(x, 10)
+  })
+
+df.merged <- do.call(rbind, df.list.top10)
+p <- ggplot(df.merged, aes(rank, rho)) + geom_point() + 
+  geom_text_repel(aes(label=gene), max.overlaps=10) + 
+  facet_grid(treatment~batch)
+
+out.file <- paste0("001Giotto_out/010immunofluorescence/merged/cor.", 
+                   gene, ".top10.png")
+ggsave(out.file, p, width=10, height=8)
+
+# GFAP的荧光图像。同一处理，不同信号来源（Image、Allen、ST、Deconvo）的比较。Allen的图像来源于野生型，因而只能和WTCtrl的比；Deconvo展示的可能是reactive astrocytes的信号，用于比较的时候要小心。最主要还是比较Image和ST的区别。脑膜、皮层内侧、丘脑的表达都是比较一致的，只是Fiber tracts的不太一致。
+```
+
+```{r ImmunoGfap, echo=FALSE, fig.cap="Gfap immuno. images"}
+knitr::include_graphics("data/st/010/Gfap.png")
+```
+
+```{r ImmunoP2ry12, echo=FALSE, fig.cap="P2ry12 immuno. images"}
+knitr::include_graphics("data/st/010/P2ry12.png")
+```
+
+```{r ImmunoThy1, echo=FALSE, fig.cap="Spatial expression of Thy1 gene and and immuno. images of Plaque"}
+knitr::include_graphics("data/st/010/Thy1.png")
+```
+
+(ref:signalExprCorGfap) 在各样品中表达量与Gfap荧光信号相关性最高的前10个基因。
+
+```{r signalExprCorGfap, echo=FALSE, fig.cap="(ref:signalExprCorGfap)"}
+knitr::include_graphics("data/st/010/cor.Gfap.top10.png")
+```
+
+(ref:signalExprCorP2ry12) 在各样品中表达量与P2ry12荧光信号相关性最高的前10个基因。
+
+```{r signalExprCorP2ry12, echo=FALSE, fig.cap="(ref:signalExprCorP2ry12)"}
+knitr::include_graphics("data/st/010/cor.P2ry12.top10.png")
+```
+
+从基因的空间荧光图像与空间转录组表达之间的比较图可以看见，两者一致性较高（Figure \@ref(fig:ImmunoGfap)；Figure \@ref(fig:ImmunoP2ry12)；Figure \@ref(fig:ImmunoThy1)）。与Gfap荧光信号最强的基因是Gfap（Figure \@ref(fig:signalExprCorGfap)），但是与P2ry12信号相关性最强的却不是P2ry12（Figure \@ref(fig:signalExprCorP2ry12)），可能的原因有：
+
+-   P2ry12在大脑的空间表达模式不明显。有这样空间表达模式的基因很多，因此这些基因与P2ry12都有较强的相关性。
+-   P2ry12的表达量比较低，导致相关性弱。
+-   P2ry12的蛋白表达分布与基因表达的分布不一致。但是从上面的基因空间表达图谱看来，这条不成立。
+
+## 4 Aβ相关基因
+
+用了两种方法来鉴定。PCGs和PIGs。
+
+PCGs的结果储存在`001Giotto_out/010immunofluorescence/merged/PLX5622_specific_PIGs.csv`以及
+`001Giotto_out/010immunofluorescence/merged/FADCtrl_specific_PIGs.csv`
+
+PIGs的结果储存在`001Giotto_out/010immunofluorescence/PIG/PIGs.lfc_0.1.csv`
+
+论文里面现在用的是哪个版本？应该是PIGs的版本。我把这个版本的表格删除了WTCtrl的部分后，加到了附表中。
+
+### PCGs
+
+计算斑块指数与基因表达量之间的相关性。以某一阈值选取相关性高的基因，即为PCGs。
+
+PCG：plaque correlated genes。
+
+#### 第一批荧光数据处理
+```{r eval=FALSE}
+"010immunofluorescence.r" # 第一批荧光数据处理
+
+#------------------------------#
+# 基因表达与Aβ指数的相关性分析 #
+#------------------------------#
+source("script/load_checkpoint.r")
+
+outdir <- "001Giotto_out/010immunofluorescence"
+if (! dir.exists(outdir)){
+  dir.create(outdir)
+}
+
+expr <- testcombo@expression$cell$rna$normalized@exprMat
+
+library(parallel)
+
+# sample <- "FADCtrl"
+samples <- c("FADCtrl", "WTCtrl", "PLX5622")
+for (sample in samples){
+  infile <- file.path(outdir, "measurement", sample, "Results.ch02.reshaped.csv")
+  measure <- read.csv(infile, row.names=1)
+  measure$barcode <- paste0(sample, "_1-", measure$barcode)
+  row.names(measure) <- measure$barcode
+  barcode.inter <- intersect(measure$barcode, colnames(expr))
+  measure.filt <- measure[barcode.inter, ]
+  immuno.index <- measure.filt$Mean
+  
+  gene.list <- as.vector(row.names(expr))
+  
+  out.list <- mclapply(gene.list, function(gene){
+    gene.expr <- expr[gene, measure.filt$barcode]
+    cor.result <- cor.test(gene.expr, immuno.index, method="spearman", exact = FALSE)
+    e <- cor.result$estimate
+    p <- cor.result$p.value
+    return(c(e, p))
+  }, mc.cores=70)
+  
+  out.df <- data.frame(do.call(rbind, out.list))
+  names(out.df) <- c("rho", "pvalue")
+  out.df$gene <- gene.list
+  out.df$fdr <- p.adjust(out.df$pvalue)
+  out.df <- out.df[order(out.df$pvalue), ]
+  out.df.filt <- out.df[out.df$fdr < 0.05, ]
+  
+  out.path <- file.path(outdir, "measurement", sample, "cor.ch02.csv")
+  write.csv(out.df, out.path)
+  out.path <- file.path(outdir, "measurement", sample, "cor.ch02.filt.csv")
+  write.csv(out.df.filt, out.path)
+}
+```
+
+#### 第二批荧光数据处理
+```{r eval=FALSE}
+"010immunofluorescence2.r" # 第二批荧光数据处理
+# 基因表达与Aβ指数的相关性分析
+
+source("script/load_checkpoint.r")
+
+outdir <- "001Giotto_out/010immunofluorescence"
+if (! dir.exists(outdir)){
+  dir.create(outdir)
+}
+
+expr <- testcombo@expression$cell$rna$normalized@exprMat
+
+library(parallel)
+
+batch <- "2"
+batch_dir <- "batch2"
+
+# sample <- "FADCtrl"
+samples <- c("FADCtrl", "WTCtrl", "PLX5622")
+for (sample in samples){
+  infile <- file.path(outdir, batch_dir, sample, "Results.ch02.reshaped.csv")
+  measure <- read.csv(infile, row.names=1)
+  measure$barcode <- paste0(sample, "_", batch, "-", measure$barcode)
+  row.names(measure) <- measure$barcode
+  barcode.inter <- intersect(measure$barcode, colnames(expr))
+  measure.filt <- measure[barcode.inter, ]
+  immuno.index <- measure.filt$Mean
+  
+  gene.list <- as.vector(row.names(expr))
+  
+  out.list <- mclapply(gene.list, function(gene){
+    gene.expr <- expr[gene, measure.filt$barcode]
+    cor.result <- cor.test(gene.expr, immuno.index, method="spearman", exact = FALSE)
+    e <- cor.result$estimate
+    p <- cor.result$p.value
+    return(c(e, p))
+  }, mc.cores=70)
+  
+  out.df <- data.frame(do.call(rbind, out.list))
+  names(out.df) <- c("rho", "pvalue")
+  out.df$gene <- gene.list
+  out.df$fdr <- p.adjust(out.df$pvalue)
+  out.df <- out.df[order(out.df$pvalue), ]
+  out.df.filt <- out.df[out.df$fdr < 0.05, ]
+  
+  out.path <- file.path(outdir, batch_dir, sample, "cor.ch02.csv")
+  write.csv(out.df, out.path)
+  out.path <- file.path(outdir, batch_dir, sample, "cor.ch02.filt.csv")
+  write.csv(out.df.filt, out.path)
+}
+```
+
+#### 处理特有的PCGs（要求rho大于0.1）
+
+方法1：对rho进行限制（\>0.1或大于0.5）
+
+```{r eval=FALSE}
+# "010immunofluorescence.two_batch.r" # 合并两批数据的结果
+
+# 文件说明：
+# measurement: batch1的每spot荧光强度表。
+# batch2: batch2的每spot荧光强度表。
+# merged.0.1：rho > 0.1为阈值的样品特有PIGs。
+# merged.0.15: rho > 0.15为阈值的样品特有PIGs。
+
+# 1. 读取相关性矩阵。
+# 2. 获取处理特有的PIGs（两种方法）。
+# 3. 通路富集分析、相关性图谱绘制。
+
+outdir <- "001Giotto_out/010immunofluorescence"
+samples <- c("FADCtrl", "WTCtrl", "PLX5622")
+
+batch_dir <- "measurement"
+df.list.1 <- lapply(samples, function(x){
+  df <- read.csv(file.path(outdir, batch_dir, x, "cor.ch02.filt.csv"))
+  df <- na.omit(df)
+  return(df)
+})
+names(df.list.1) <- samples
+
+batch_dir <- "batch2"
+df.list.2 <- lapply(samples, function(x){
+  df <- read.csv(file.path(outdir, batch_dir, x, "cor.ch02.filt.csv"))
+  df <- na.omit(df)
+  return(df)
+})
+names(df.list.2) <- samples
+
+#--------------------#
+# 处理特有的PIGs鉴定 # 
+#--------------------#
+
+# 怎样才算是处理特有？
+# 1. 在该处理的两个样品中都有，而在其他处理的所有样品中都没有（最严格）。
+# 2. 在该处理的两个样品中都有，而在其他处理中并非所有样品都有。
+# 3. 在该处理的任意样品中有，而在其他处理的所有样品中都没有。
+
+#----------------------------------------------#
+# 方法1（而且还对rho进行了限制（>0.1或大于0.5））
+
+# rho > 0.15 的基因
+rho_cutoff <- 0.1
+batch_dir <- "merged.0.1" # 输出目录
+
+genes.up.list.1 <- lapply(df.list.1, function(x){
+  return(x[x$rho > rho_cutoff, "gene"])
+})
+genes.up.list.2 <- lapply(df.list.2, function(x){
+  return(x[x$rho > rho_cutoff, "gene"])
+})
+
+# 统计两个批次的交集。
+genes.up.list <- list()
+for (s in samples){
+  gl.1 <- genes.up.list.1[[s]]
+  gl.2 <- genes.up.list.2[[s]]
+  gl.inter <- intersect(gl.1, gl.2)
+  cat(s, length(gl.1), length(gl.2), length(gl.inter), "\n")
+  genes.up.list[[s]] <- gl.inter
+}
+
+# 输出ivenn格式的文件，可以在http://www.interactivenn.net/中绘制韦恩图。
+dir.create(file.path(outdir, batch_dir))
+ivenn <- file(file.path(outdir, batch_dir, "PGIs.ivenn"), "w")
+n <- 1
+for (i in names(genes.up.list)){
+  cat(i, ":", paste(genes.up.list[[i]], collapse=","), ";", sep="", file=ivenn)
+  if (n < 3) cat("\n", file=ivenn)
+  n <- n + 1
+}
+close(ivenn)
+
+# 特有基因
+unique_PIGs <- lapply(samples, function(x){
+  gl <- genes.up.list[[x]]
+  for (i in samples){
+    if(i == x) next
+    gl2 <- genes.up.list[[i]]
+    gl <- setdiff(gl, gl2)
+  }
+  # 对特有基因根据pvaue进行排序。
+  df <- df.list.1[[x]] # 假设df是已经按照pvalue排好序的。
+  gl <- df[df$gene %in% gl, "gene"]
+  return(gl)
+})
+
+names(unique_PIGs) <- samples
+lapply(unique_PIGs, paste, collapse=",")
+
+# 前10个特有基因。
+unique_PIGs.top10 <- lapply(unique_PIGs, function(x){
+  head(x, 9)
+})
+
+# 代表性PIGs（top10）的相关性散点图，使用batch1的来绘制。
+library(ggplot2)
+library(patchwork)
+
+expr <- testcombo@expression$cell$rna$normalized@exprMat
+for (s in samples){
+  infile <- file.path(outdir, "measurement", s, "Results.ch02.reshaped.csv")
+  measure <- read.csv(infile, row.names=1)
+  measure$barcode <- paste0(s, "_1-", measure$barcode)
+  row.names(measure) <- measure$barcode
+  barcode.inter <- intersect(measure$barcode, colnames(expr))
+  measure.filt <- measure[barcode.inter, ]
+  immuno.index <- measure.filt$Mean
+  p.list <- list()
+  for (gene in unique_PIGs.top10[[s]]){
+    gene.expr <- expr[gene, measure.filt$barcode]
+    data <- data.frame(plaque_index=immuno.index, gene.expr=gene.expr)
+    # m <- lm(formula = gene.expr ~ plaque_index, data = data)
+    # r <- summary(m)
+    # r.square <- r$adj.r.squared
+    rho <- df.list.1[[s]]$rho[df.list.1[[s]]$gene == gene]
+    p <- ggplot(data, aes(plaque_index, gene.expr)) + geom_point() +
+      stat_smooth(method = "lm") + ggtitle(gene) +
+      annotate("text",  x=Inf, y = Inf, label = paste0("rho == ", rho),
+        parse = TRUE, vjust=1, hjust=1)
+    p.list[[gene]] <- p
+  }
+  pall <- wrap_plots(p.list, ncol=3)
+  outfile <- file.path(outdir, batch_dir, s, paste0(s, ".PIGs_scatterPlot.png"))
+  ggsave(outfile, pall, width=7, height=7)
+}
+
+# 处理特有PIGs的通路富集分析
+out.file <- file(file.path(outdir, batch_dir, "treatment_specific_PIGs.txt"), "w")
+for (s in samples){
+  cat(s, "\t", paste(unique_PIGs[[s]], collapse=","), "\n", file=out.file, sep="")
+}
+close(out.file)
+
+# PLX5622-specific 的PIGs在FADCtrl中的相关性情况。
+df.AD1 <- df.list.1[["FADCtrl"]]
+row.names(df.AD1) <- df.AD1$gene
+
+df.AD2 <- df.list.2[["FADCtrl"]]
+row.names(df.AD2) <- df.AD2$gene
+
+df.PL1 <- df.list.1[["PLX5622"]]
+row.names(df.PL1) <- df.PL1$gene
+
+df.PL2 <- df.list.2[["PLX5622"]]
+row.names(df.PL2) <- df.PL2$gene
+
+gene.list <- "Atf4|Atp2a2|Myo5a|Nptn|Slc8a1|Bok|Clstn1|Atp2b1|Kctd17"
+gene.list <- strsplit(gene.list, "\\|")[[1]]
+gene.list[! gene.list %in% union(row.names(df.AD1), row.names(df.AD2))]
+
+gene.list <- unique_PIGs[["FADCtrl"]]
+df.AD1[gene.list, ]
+df.AD2[gene.list, ]
+df.PL1[gene.list, ]
+df.PL2[gene.list, ]
+
+gene.list[! gene.list %in% union(row.names(df.PL1), row.names(df.PL2))]
+```
+
+#### 方法2（不对rho进行限制）
+
+```{r eval=FALSE}
+#----------------------------------------------#
+# 方法2（不对rho进行限制）
+
+# 为了绘制共表达网络图，需要更多的基因。于是放宽筛选标准。不对rho进行限制，只要求FDR小于0.05。
+
+# 先整理表格，一行是一个基因，包含这个基因在所有样品中与Aβ index的相关系数、pvalue。
+# "001Giotto_out/010immunofluorescence/batch2/PLX5622/cor.ch02.csv"
+# gene,rho.WT1,fdr.WT1,rho.WT2,fdr.WT2,...
+
+treatments <- c("FADCtrl", "WTCtrl", "PLX5622")
+
+df.list <- list()
+n <- 1
+for (s in treatments){
+  for (b in c("1", "2")){
+    if (b == "1") {
+      batch_dir <- "measurement"
+      channel <- "ch02"
+    }
+    else {
+      batch_dir <- "batch2"
+      channel <- "ch02"
+    }
+    infile <- paste0("001Giotto_out/010immunofluorescence/", batch_dir, "/", s, "/cor.", channel, ".csv")
+    df1 <- read.csv(infile, row.names=1)
+    df1 <- df1[, c("gene", "rho", "fdr")]
+    df1$fdr[is.na(df1$fdr)] <- 1
+    colnames(df1) <- c("gene", paste0("rho.", s, "_", b), paste0("fdr.", s, "_", b))
+    df.list[[n]] <- df1
+    n <- n + 1
+  }
+}
+
+df.merged <- Reduce(function(x, y) {merge(x, y, by="gene")}, df.list)
+
+batch_dir <- "merged" # 输出目录
+dir.create("001Giotto_out/010immunofluorescence/merged")
+
+#-----------------------#
+# 执行筛选。
+# FADCtrl、PLX5622分别鉴定。
+# 宽松的筛选标准：FDR < 0.05
+FADCtrl.PCGs <- df.merged[df.merged$fdr.FADCtrl_1 < 0.05 & df.merged$fdr.FADCtrl_2 < 0.05, "gene"]
+PLX5622.PCGs <- df.merged[df.merged$fdr.PLX5622_1 < 0.05 & df.merged$fdr.PLX5622_2 < 0.05, "gene"]
+
+length(FADCtrl.PCGs)
+# [1] 279
+length(PLX5622.PCGs)
+# [1] 457
+
+# 稍严格的筛选标准：FDR < 0.05 & rho > 0.1
+rho.cutoff <- 0.15
+FADCtrl.PCGs <- df.merged[df.merged$fdr.FADCtrl_1 < 0.05 &
+                            df.merged$rho.FADCtrl_1 > rho.cutoff &
+                            df.merged$fdr.FADCtrl_2 < 0.05 &
+                            df.merged$rho.FADCtrl_2 > rho.cutoff, "gene"]
+PLX5622.PCGs <- df.merged[df.merged$fdr.PLX5622_1 < 0.05 &
+                            df.merged$rho.PLX5622_1 > rho.cutoff &
+                            df.merged$fdr.PLX5622_2 < 0.05 &
+                            df.merged$rho.PLX5622_2 > rho.cutoff, "gene"]
+
+# 处理特有的PCGs
+# PLX5622 specific: 严格
+condition2 <- (df.merged$fdr.FADCtrl_1 >= 0.05 & df.merged$fdr.FADCtrl_2 >= 0.05) & 
+              (df.merged$fdr.PLX5622_1 < 0.05 & df.merged$fdr.PLX5622_2 < 0.05)
+
+PLX5622_specific_PIGs <- df.merged[condition2, ]
+PLX5622_specific_PIGs <- PLX5622_specific_PIGs[order(PLX5622_specific_PIGs$rho.PLX5622_1), ]
+PLX5622_specific_PIGs <- subset(PLX5622_specific_PIGs, rho.PLX5622_1 * rho.PLX5622_2>0)
+write.csv(PLX5622_specific_PIGs, "001Giotto_out/010immunofluorescence/merged/PLX5622_specific_PIGs.csv")
+PLX5622_specific_PIGs[PLX5622_specific_PIGs$rho.PLX5622_1 < 0, ] # 15个PIX5622特有的负相关基因，大部分为核糖体蛋白。
+# 51个PIX5622特有的正相关基因
+
+# FADCtrl specific: 严格
+condition3 <- (df.merged$fdr.FADCtrl_1 < 0.05 & df.merged$fdr.FADCtrl_2 < 0.05) &
+              (df.merged$fdr.PLX5622_1 >= 0.05 & df.merged$fdr.PLX5622_2 >= 0.05)
+
+FADCtrl_specific_PIGs <- df.merged[condition3, ]
+FADCtrl_specific_PIGs <- FADCtrl_specific_PIGs[order(FADCtrl_specific_PIGs$rho.FADCtrl_1), ]
+nrow(FADCtrl_specific_PIGs) # 21，其中有9个基因是在两个个体中都是负相关的。Slc6a11, Ntrk2等基因都可以认为是被Aβ抑制了的基因，在药物处理后得到恢复。
+FADCtrl_specific_PIGs <- subset(FADCtrl_specific_PIGs, rho.FADCtrl_1 * rho.FADCtrl_2>0) # 去掉rho方向相反的。
+
+write.csv(FADCtrl_specific_PIGs, "001Giotto_out/010immunofluorescence/merged/FADCtrl_specific_PIGs.csv")
+
+# 分别获得PLX5622的PIGs和FADCtrl的PIGs，用于绘制韦恩图。
+condition <- df.merged$fdr.FADCtrl_1 < 0.05 & df.merged$fdr.FADCtrl_2 < 0.05
+FADCtrl_PIGs <- df.merged[condition, ]
+condition <- df.merged$fdr.PLX5622_1 < 0.05 & df.merged$fdr.PLX5622_2 < 0.05
+PLX5622_PIGs <- df.merged[condition, ]
+
+library(VennDiagram)
+ 
+# Generate 3 sets of 200 words
+set1 <- FADCtrl_PIGs$gene
+set2 <- PLX5622_PIGs$gene
+
+# Prepare a palette of 3 colors with R colorbrewer:
+library(RColorBrewer)
+myCol <- brewer.pal(3, "Pastel2")[1:2]
+
+# Chart
+venn.diagram(
+        x = list(set1, set2),
+        category.names = c("FADCtrl PIGs" , "PLX5622 PIGs"),
+        filename = '001Giotto_out/010immunofluorescence/merged/venn_diagramm.png',
+        imagetype = "png", 
+        cat.pos = c(-30, 30), # 在绘制出来的图片的基础上面调整角度。与文档中的不一致。
+        fill=c("lightgreen", "lightsalmon"),
+        col=c("lightgreen",  "lightsalmon"),
+        cat.col=c("green", "salmon")
+)
+
+#---------------------------------------------------#
+# 主要看上面的结果。下面的结果只是探索性地分析一下。
+
+# 所有样品共有的PIGs
+condition1 <- df.merged$fdr.FADCtrl_1 < 0.05 & df.merged$fdr.FADCtrl_2 < 0.05 &
+              df.merged$fdr.WTCtrl_1 < 0.05 & df.merged$fdr.WTCtrl_2 < 0.05 & 
+              df.merged$fdr.PLX5622_1 < 0.05 & df.merged$fdr.PLX5622_2 < 0.05
+common_PIGs <- df.merged[condition1, ]
+common_PIGs <- common_PIGs[order(common_PIGs$rho.FADCtrl_1), ]
+write.csv(common_PIGs, "001Giotto_out/010immunofluorescence/merged/common_PIGs.csv")
+
+
+# all PIGs
+condition4 <- (df.merged$fdr.FADCtrl_1 < 0.05 & df.merged$fdr.FADCtrl_2 < 0.05) |
+              (df.merged$fdr.WTCtrl_1 < 0.05 & df.merged$fdr.WTCtrl_2 < 0.05) | 
+              (df.merged$fdr.PLX5622_1 < 0.05 & df.merged$fdr.PLX5622_2 < 0.05)
+
+all_PIGs <- df.merged[condition4, ]
+all_PIGs <- all_PIGs[order(all_PIGs$rho.FADCtrl_1), ]
+all_PIGs  
+write.csv(all_PIGs, "001Giotto_out/010immunofluorescence/merged/all_PIGs.csv")
+
+# PL and AD common PIGs
+condition5 <- (df.merged$fdr.FADCtrl_1 < 0.05 & df.merged$fdr.FADCtrl_2 < 0.05) &
+              (df.merged$fdr.PLX5622_1 < 0.05 & df.merged$fdr.PLX5622_2 < 0.05)
+
+PL_AD_common_PIGs <- df.merged[condition5, ]
+PL_AD_common_PIGs <- PL_AD_common_PIGs[order(PL_AD_common_PIGs$rho.FADCtrl_1), ]
+write.csv(PL_AD_common_PIGs, "001Giotto_out/010immunofluorescence/merged/PL_AD_common_PIGs.csv")
+
+# overlap between all_PIGs and ST rescued genes. 
+# implemented in `script/003identify_DEGs.filter_DEGs.r`
+
+# PL_AD_common_PIGs & spatial genes
+AD.spatial <- readLines("001Giotto_out/005spatial_genes/spatial_gene/FADCtrl.txt")
+PL.spatial <- readLines("001Giotto_out/005spatial_genes/spatial_gene/PLX5622.txt")
+AD_PL_common_spatial <- union(AD.spatial, PL.spatial) # 194
+PL_AD_common_spatial_PIGs <- intersect(AD_PL_common_spatial, PL_AD_common_PIGs$gene)
+length(PL_AD_common_spatial_PIGs) # 192
+
+# extract expression matrix
+source("script/load_checkpoint.r")
+
+# 要使用单独一个样品来构建网络，还是使用多个样品一起？
+# 先试试多个样品一起。
+expr <- get_expression_values(testcombo, values="normalized", output="matrix")
+cells <- grep("PLX5622|FADCtrl", colnames(expr), value=T)
+PL_AD_common_spatial_PIGs.expr <- expr[PL_AD_common_spatial_PIGs, cells]
+PL_AD_common_spatial_PIGs.expr <- as.matrix(PL_AD_common_spatial_PIGs.expr)
+write.csv(PL_AD_common_spatial_PIGs.expr, "001Giotto_out/010immunofluorescence/merged/PL_AD_common_spatial_PIGs.expr.csv")
+
+
+```
+
+#### 散点图绘制及通路富集分析
+
+```{r eval=FALSE}
+# 代表性PIGs（top10）的相关性散点图，使用batch1的来绘制。
+
+library(ggplot2)
+library(patchwork)
+
+expr <- testcombo@expression$cell$rna$normalized@exprMat
+for (s in samples){
+  infile <- file.path(outdir, "measurement", s, "Results.ch02.reshaped.csv")
+  measure <- read.csv(infile, row.names=1)
+  measure$barcode <- paste0(s, "_1-", measure$barcode)
+  row.names(measure) <- measure$barcode
+  barcode.inter <- intersect(measure$barcode, colnames(expr))
+  measure.filt <- measure[barcode.inter, ]
+  immuno.index <- measure.filt$Mean
+  p.list <- list()
+  for (gene in unique_PIGs.top10[[s]]){
+    gene.expr <- expr[gene, measure.filt$barcode]
+    data <- data.frame(plaque_index=immuno.index, gene.expr=gene.expr)
+    # m <- lm(formula = gene.expr ~ plaque_index, data = data)
+    # r <- summary(m)
+    # r.square <- r$adj.r.squared
+    rho <- df.list.1[[s]]$rho[df.list.1[[s]]$gene == gene]
+    p <- ggplot(data, aes(plaque_index, gene.expr)) + geom_point() +
+      stat_smooth(method = "lm") + ggtitle(gene) +
+      annotate("text",  x=Inf, y = Inf, label = paste0("rho == ", rho),
+        parse = TRUE, vjust=1, hjust=1)
+    p.list[[gene]] <- p
+  }
+  pall <- wrap_plots(p.list, ncol=3)
+  outfile <- file.path(outdir, batch_dir, s, paste0(s, ".PIGs_scatterPlot.png"))
+  ggsave(outfile, pall, width=7, height=7)
+}
+
+# 处理特有PIGs的通路富集分析
+out.file <- file(file.path(outdir, batch_dir, "treatment_specific_PIGs.txt"), "w")
+genes <- subset(PLX5622_specific_PIGs, rho.PLX5622_1 > 0, select=gene, drop=T)
+cat("PLX5622.pos", "\t", paste(genes, collapse=","), "\n", file=out.file, sep="")
+genes <- subset(PLX5622_specific_PIGs, rho.PLX5622_1 < 0, select=gene, drop=T)
+cat("PLX5622.neg", "\t", paste(genes, collapse=","), "\n", file=out.file, sep="")
+genes <- subset(FADCtrl_specific_PIGs, rho.FADCtrl_1 > 0, select=gene, drop=T)
+cat("FADCtrl.pos", "\t", paste(genes, collapse=","), "\n", file=out.file, sep="")
+genes <- subset(FADCtrl_specific_PIGs, rho.FADCtrl_1 < 0, select=gene, drop=T)
+cat("FADCtrl.neg", "\t", paste(genes, collapse=","), "\n", file=out.file, sep="")
+close(out.file)
+
+genelist <- read.table(file.path(outdir, batch_dir, "treatment_specific_PIGs.txt"), sep="\t")
+
+# 各处理的PCGs交集Venn图。263个PLX5622特有，85个FADCtrl特有；194个共有。
+
+# 鉴定出了一些PLX5622特有的PIGs（Atf4|Atp2a2|Myo5a|Nptn|Slc8a1|Bok|Clstn1|Atp2b1|Kctd17），但是发现这些基因其实在FADCtrl.1里面也是PIG，只是在FADCtrl.2里面不是。所以这到底是随机的个体差异导致，还是真实的处理间差异，仍不清楚。
+```
+
+### PIGs
+
+#### PIGs鉴定
+
+Idea: Divide spots into 2 groups according to a Abeta index cutoff, and perform differential expression analysis.
+
+Procedure:
+
+1.  Set the cutoff and group spots
+2.  differential expression analysis
+3.  Compare between PLX5622 and WTCtrl
+
+```{r eval=FALSE}
+
+# ------------------------------- # 
+# 目标：鉴定PIGs。
+# 思路：把Aβ指数低的spot和Aβ指数高的spot进行差异表达分析，得到差异表达基因。
+# 步骤：
+# 1. 选取合适的斑块指数阈值
+# 2. spot分组
+# 3. FindMarkers差异表达分析
+# 4. 比较不同批次、不同处理组之间的差异。
+
+# ------------------------------- # 
+# 执行分析
+# ------------------------------- # 
+
+# 加载Giotto对象
+source("script/load_checkpoint.r")
+
+meta <- pDataDT(testcombo)
+
+samples <- c("FADCtrl_1", "FADCtrl_2", "WTCtrl_1", 
+             "WTCtrl_2", "PLX5622_1", "PLX5622_2")
+
+measure.list <- list()
+n <- 1
+for (sample in samples){
+  # 读取Abeta index数据
+  treatment <- strsplit(sample, "_")[[1]][1]
+  batch <- strsplit(sample, "_")[[1]][2]
+  if (batch=="1"){
+    infile <- file.path("001Giotto_out/010immunofluorescence", 
+                        "measurement", 
+                        treatment, "Results.ch02.reshaped.csv")
+  } else if (batch=="2"){
+    infile <- file.path("001Giotto_out/010immunofluorescence",
+                        "batch2", 
+                        treatment, "Results.ch02.reshaped.csv")
+  }
+  
+  measure <- read.csv(infile, row.names=1)
+  # 把Abeta index合并到metadata中。
+  
+  measure$barcode <- paste0(sample, "-", measure$barcode)
+  row.names(measure) <- measure$barcode
+  measure.list[[n]] <- measure
+  n <- n + 1
+}
+measure.df <- do.call(rbind, measure.list)
+
+meta <- testcombo@cell_metadata$cell$rna@metaDT
+testcombo@cell_metadata$cell$rna@metaDT$Abeta_index <- measure.df[meta$cell_ID, "Mean"]
+meta <- testcombo@cell_metadata$cell$rna@metaDT
+
+write.csv(meta, "001Giotto_out/010immunofluorescence/merged/meta.Abeta.csv")
+
+# 探索合适的Abeta index阈值
+library(ggplot2)
+outdir <- "001Giotto_out/010immunofluorescence/PIG"
+dir.create(outdir)
+# 绘制Abeta分布图。
+p <- ggplot(meta, aes(x=Abeta_index)) + 
+  geom_histogram(binwidth=2) + 
+  facet_wrap(.~list_ID, ncol=2)
+ggsave(paste0("001Giotto_out/010immunofluorescence/PIG/", 
+              "Abeta.hist.png"), p, width=8, height=6)
+
+# 探索不同Abeta index阈值筛选下，保留的spot比例。
+for(cutoff in seq(1, 30, 1)){
+  keep.ratio <- nrow(meta[meta$Abeta_index > cutoff, ])/nrow(meta)
+  cat("cutoff:", cutoff, "keep ratio:", keep.ratio, "\n")
+}
+
+testcombo@cell_metadata$cell$rna@metaDT$sdimx <- testcombo@spatial_locs$cell$raw@coordinates$sdimx
+testcombo@cell_metadata$cell$rna@metaDT$sdimy <- testcombo@spatial_locs$cell$raw@coordinates$sdimy
+
+# 把点图绘制出来看看。
+  # 绘制带轮廓的点：
+  # 1. 使用大小不一样的点，重叠在一起。
+  # 2. 同时指定fill和color
+  # 3. 使用shap=21
+meta <- pDataDT(testcombo)
+
+for (Abeta_index_cutoff in c(1, 2, 3, 5, 8, 10)){
+  # Abeta_index_cutoff <- 10
+  meta$Abeta_pos <- ifelse(meta$Abeta_index > Abeta_index_cutoff, 
+                          yes = "pos", no="neg")
+  p <- ggplot(meta[meta$treatment != "WTCtrl", ], aes(sdimx, sdimy)) + 
+    # geom_point(aes(color=cell_types), size=1.1) + 
+    # scale_color_discrete() + 
+    geom_point(aes(color=Abeta_pos), size=1) + 
+    scale_color_manual(values = c(pos="red", neg="white")) + 
+    facet_wrap(.~list_ID, ncol=2, scales="free") + 
+    guides(color = guide_legend(override.aes = list(size = 1.5))) + 
+    theme(strip.text=element_text(size=12, face="bold"), 
+          legend.title = element_text(size = 12), 
+          legend.text = element_text(size = 12))
+  out.file <- paste0("001Giotto_out/010immunofluorescence/PIG/Aeta.dot.", 
+                     Abeta_index_cutoff, ".png")
+  ggsave(out.file, p, width=8, height=8)
+}
+
+Abeta_index_cutoff <- 10
+meta$Abeta_pos <- ifelse(meta$Abeta_index > Abeta_index_cutoff, 
+                          yes = "pos", no="neg")
+
+# 差异表达分析
+# lfc.cutoff <- 0.1
+for (lfc.cutoff in c(0, 0.1, 0.2)){
+  PIGs.list <- list()
+  for (sample in samples){
+    cat("sample:", sample, "\n")
+    gobj <- subsetGiotto(testcombo, 
+                         cell_ids=meta[meta$list_ID == sample, ][["cell_ID"]])
+    r <- findScranMarkers(gobj, group_1="pos", 
+                          group_2="neg", cluster_column="Abeta_pos", 
+                          test.type="wilcox", lfc=lfc.cutoff, direction="up")
+    # 关于这个findScranMarkers结果的解释，参考onenote笔记《理解scran::findMarkers》
+    r1 <- r[sapply(r, function(x){x$cluster[1]=="pos"})][[1]]
+    r1 <- r1[r1$FDR < 0.05, ]
+    # PIGs <- r1[r1$FDR < 0.05, ][["feats"]] # 在lfc=0.1下，有21个PIGs。
+    r1$sample <- sample
+    PIGs.list[[sample]] <- r1
+  }
+  
+  PIGs.df <- do.call(rbind, PIGs.list)
+  out.file <- paste0("001Giotto_out/010immunofluorescence/PIG/PIGs.lfc_", 
+                     lfc.cutoff, ".csv")
+  write.csv(PIGs.df, out.file)
+}
+
+```
+
+#### 处理特有的PIGs
+
+```{r eval=FALSE}
+#-------------------------------# 
+# 取FADCtrl和PLX5622的交集 
+PIGs.df <- read.csv("001Giotto_out/010immunofluorescence/PIG/PIGs.lfc_0.1.csv", row.names=1)
+FADCtrl.PIGs <- intersect(PIGs.df[PIGs.df$sample=="FADCtrl_1", "feats"], 
+                     PIGs.df[PIGs.df$sample=="FADCtrl_2", "feats"])
+PLX5622.PIGs <- intersect(PIGs.df[PIGs.df$sample=="PLX5622_1", "feats"], 
+                     PIGs.df[PIGs.df$sample=="PLX5622_2", "feats"])
+WTCtrl.PIGs <- intersect(PIGs.df[PIGs.df$sample=="WTCtrl_1", "feats"], 
+                     PIGs.df[PIGs.df$sample=="WTCtrl_2", "feats"])
+length(FADCtrl.PIGs)
+length(PLX5622.PIGs)
+PL.inter.AD <- intersect(FADCtrl.PIGs, PLX5622.PIGs)
+FADCtrl.specific <- setdiff(FADCtrl.PIGs, PLX5622.PIGs)
+PLX5622.specific <- setdiff(PLX5622.PIGs, FADCtrl.PIGs)
+
+#-------------------------------# 
+# 与ST DEGs的overlap
+# 读取空间转录组DEGs文件，并整理成比较容易处理的格式。
+DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_0.3.csv", row.names=1)
+
+# 把一行一个genelist改成一行一个基因。
+from_multiGenelist <- function(DEGs){
+  DEGs <- DEGs[DEGs$geneList != "", ]
+  DEGs2.list <- lapply(1:nrow(DEGs), function(x){
+    gene.list <- strsplit(DEGs[x, "geneList"], ";")[[1]]
+    gene.n <- length(gene.list)
+    data.frame(gene=gene.list, 
+               cellType=rep(DEGs[x, "cellType"], gene.n), 
+               comparison=rep(DEGs[x, "comparison"], gene.n),
+               direction=rep(DEGs[x, "direction"], gene.n))
+  })
+  DEGs2 <- do.call(rbind, DEGs2.list)
+  return(DEGs2)
+}
+# 找出PIGs与DEGs的交集。
+intersect(DEGs2$gene, FADCtrl.specific)
+intersect(DEGs2$gene, PL.inter.AD)
+DEGs2[DEGs2$gene %in% PLX5622.specific, ]
+
+#-------------------------------# 
+
+# PIGs与PCGs的交集(LFC > 0)。
+AD.PIG.inter.PCG <- intersect(FADCtrl.PIGs, FADCtrl.PCGs)
+PL.PIG.inter.PCG <- intersect(PLX5622.PIGs, PLX5622.PCGs)
+length(AD.PIG.inter.PCG) # 105
+length(PL.PIG.inter.PCG) # 270
+length(setdiff(FADCtrl.PIGs, FADCtrl.PCGs))
+length(setdiff(FADCtrl.PCGs, FADCtrl.PIGs))
+length(setdiff(PLX5622.PIGs, PLX5622.PCGs))
+length(setdiff(PLX5622.PCGs, PLX5622.PIGs))
+
+length(AD.PIG.inter.PCG) # 105
+length(PL.PIG.inter.PCG) # 270
+
+#-------------------------------# 
+# 读取单细胞转录组DEGs文件，并整理成比较容易处理的格式。
+library(Rvenn)
+
+DEGs.sc <- read.csv("../002SC/001Seurat_out/004DEGs/wilcox/wilcox.each_cell.log2fc_0.2.csv", row.names=1)
+DEGs.sc2 <- from_multiGenelist(DEGs.sc)
+DEGs.sc2 <- aggregate(cellType~gene+comparison+direction, function(x){paste(x, collapse=";")}, data=DEGs.sc2)
+DEGs.sc2 <- DEGs.sc2[order(DEGs.sc2$gene), ]
+
+# 只显示重叠的基因
+intersect(PL.inter.AD, DEGs.sc2$gene)
+intersect(FADCtrl.specific, DEGs.sc2$gene)
+intersect(PLX5622.specific, DEGs.sc2$gene)
+
+# 显示重叠的基因，也显示基因的差异表达信息。
+DEGs.sc2[DEGs.sc2$gene %in% PL.inter.AD, ]
+DEGs.sc2[DEGs.sc2$gene %in% FADCtrl.specific, ]
+DEGs.sc2[DEGs.sc2$gene %in% PLX5622.specific, ]
+```
+
+#### 给图片上色
+
+```{r}
+
+PIGs.df <- read.csv("../001ST/001Giotto_out/010immunofluorescence/PIG/PIGs.lfc_0.1.csv", row.names=1)
+FADCtrl.PIGs <- intersect(PIGs.df[PIGs.df$sample=="FADCtrl_1", "feats"], 
+                     PIGs.df[PIGs.df$sample=="FADCtrl_2", "feats"])
+PLX5622.PIGs <- intersect(PIGs.df[PIGs.df$sample=="PLX5622_1", "feats"], 
+                     PIGs.df[PIGs.df$sample=="PLX5622_2", "feats"])
+WTCtrl.PIGs <- intersect(PIGs.df[PIGs.df$sample=="WTCtrl_1", "feats"], 
+                     PIGs.df[PIGs.df$sample=="WTCtrl_2", "feats"])
+length(FADCtrl.PIGs)
+length(PLX5622.PIGs)
+PL.inter.AD <- intersect(FADCtrl.PIGs, PLX5622.PIGs)
+FADCtrl.specific <- setdiff(FADCtrl.PIGs, PLX5622.PIGs)
+PLX5622.specific <- setdiff(PLX5622.PIGs, FADCtrl.PIGs)
+
+st.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+sc.DEGs <- read.csv("001Seurat_out/004DEGs/wilcox/sc.DEGs.csv", row.names=1)
+
+for (i in PL.inter.AD) {
+  df <- subset(st.DEGs, gene==i)
+  df <- df[order(df$comparison), ]
+  if (nrow(df) > 0){
+    print(df)
+  }
+  cat ("\n")
+}
+
+for (i in PL.inter.AD) {
+  df <- subset(sc.DEGs, gene==i)
+  df <- df[order(df$comparison), ]
+  if (nrow(df) > 0){
+    print(df)
+  }
+  cat ("\n")
+}
+
+```
+
+
+**结果：**
+
+(ref:PIGsIntersection) Intersection of PLX5622 and FADCtrl PIGs（LFC\>0.1）. 蓝点代表该基因属于SC分析中得到的DEGs，红点代表基因属于ST分析中的DEGs。
+
+```{r PIGsIntersection, echo=FALSE, fig.cap="(ref:PIGsIntersection)"}
+knitr::include_graphics("data/st/010/PIGs_intersection.png")
+```
+
+**结果描述：**
+
+-   PIGs result is consistent to PCGs result.
+
+-   PIGs result is consistent to ST DEGs.
+
+-   Many microglia related genes are ADCtrl PIGs but not PXL5622 PIGs.
+
+Snap25是一个突触相关基因，被用于衡量谷氨酸盐的释放程度[@deceglia2023]。如何解释Snap25在药物处理后与Abeta相关性上升？
+
+与斑块关联的基因似乎发生了变化，小胶质细胞是单纯地表达下降了，还是同时功能也发生了变化？
+
+PLX5622中的特有PIGs是小胶特有的吗？还是说是星胶或者其他细胞类型特有的？
+
+可以检查一下这些基因在不同样品中的pvalue排名。找出排名差异大的。
+
+## 5 Aβ与各细胞类型的联系
+
+### 5.1 Aβ与小胶质细胞
+
+#### Aβ与HOM/DAM的相关性
+
+```{r eval=FALSE}
+library(ggplot2)
+expr <- testcombo@expression$cell$rna$normalized@exprMat
+meta <- pDataDT(testcombo)
+DAM.markers <- c("Trem2", "Tyrobp", "Lpl", "Apoe", "Ctsd")
+HOM.markers <- c("P2ry12", "Tmem119", "Cx3cr1", "Cd33")
+expr.df <- data.frame(t(as.matrix(expr[c(DAM.markers, HOM.markers), ])))
+meta.sub <- cbind(meta[, c("list_ID", "treatment", "cell_types", "Abeta_index", "batch")], expr.df)
+
+for (s in c("PLX5622_1", "PLX5622_2", "FADCtrl_1", "FADCtrl_2")){
+  print(s)
+  df <- meta.sub[meta.sub$list_ID==s, ]
+  r <- cor.test(df$Trem2, df$Abeta_index, method="spearman")
+  print(r)
+  r <- cor.test(df$Tmem119, df$Abeta_index, method="spearman")
+  print(r)
+}
+
+# 两个批次分开
+p <- ggplot(meta.sub, aes(Abeta_index, Trem2, color=treatment)) + 
+  geom_point() + geom_smooth(method="lm") + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/DAM_and_Abeta.png", p, width=7, height=3)
+
+p <- ggplot(meta.sub, aes(Abeta_index, Tmem119, color=treatment)) + 
+  geom_point() + geom_smooth(method="lm") + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/Tmem119_and_Abeta.png", p, width=7, height=3)
+
+# 合并两个批次
+for (treat in c("5xFAD-CTRL", "5xFAD-PLX")) {
+  cat("treatment:", treat, "\n")
+  df <- subset(meta.sub, treatment==treat)
+  x <- cor.test(df$Tmem119, df$Abeta_index, method="spearman")
+  cat("gene: Tmem119\n")
+  cat("ρ:", x$estimate, "\n")
+  cat("p:", x$p.value, "\n")
+  x <- cor.test(df$Trem2, df$Abeta_index, method="spearman")
+  cat("gene: Trem2\n")
+  cat("ρ:", x$estimate, "\n")
+  cat("p:", x$p.value, "\n")
+  cat("\n")
+}
+
+meta.sub <- subset(meta.sub, treatment %in% c("PLX5622", "FADCtrl"))
+mapping <- c("PLX5622"="5xFAD-PLX", "FADCtrl"="5xFAD-CTRL")
+meta.sub$treatment <- mapping[meta.sub$treatment]
+meta.sub2<- meta.sub[, c("Abeta_index", "treatment", "Trem2", "Tmem119")]
+meta.sub2 <- melt(meta.sub2, id.vars=c("Abeta_index", "treatment"),
+                  variable.name="gene", value.name="expr")
+
+group.colors <- c("5xFAD-CTRL"="#d95f02", "5xFAD-PLX"="#1b9e77")
+
+p <- ggplot(meta.sub2, aes(Abeta_index, expr, color=treatment)) + 
+  geom_point(size=0.2) + geom_smooth(method="lm") + 
+  scale_color_manual(values=group.colors) + 
+  facet_grid(.~gene) + 
+  theme(text=element_text(family="Arial"), panel.background=element_blank())
+ggsave("001Giotto_out/010immunofluorescence/merged/DAM_and_Abeta2.png", p, width=4, height=2)
+
+```
+
+
+#### Aβ index与HOM/DAM ratio
+
+为了验证药物处理后DAM是否更加富集于Aβ附近，分别计算PL和AD组中HOM:DAM ratio与Aβ index的相关系数，比较其大小。
+
+如果直接比较DAM与Aβ的相关系数，由于PL中小胶的信号普遍较弱，PL组很可能会相关系数很低。使用HOM:DAM相当于把DAM与Aβ的相关性进行标准化了，使得两个处理之间可比性更强。
+
+```{r eval=FALSE}
+
+# 1. 按照“PIGs鉴定”中的代码读取Aβ index
+# 2. 根据treatment、brain regions对Aβ index以及Thy1、Trem2、Tmem119进行分类汇总。
+# 3. 绘制散点图，计算相关系数。
+library(ggplot2)
+expr <- testcombo@expression$cell$rna$normalized@exprMat
+
+#---------------------------------------------------------
+# 直接计算DAM~Aβ
+DAM.markers <- c("Trem2", "Tyrobp", "Lpl", "Apoe", "Ctsd")
+HOM.markers <- c("P2ry12", "Tmem119", "Cx3cr1", "Cd33")
+expr.df <- data.frame(t(as.matrix(expr[c(DAM.markers, HOM.markers), ])))
+meta.sub <- cbind(meta[, c("treatment", "cell_types", "Abeta_index", "batch")], expr.df)
+
+# 把几个marker的值合起来或许检测灵敏度会高一些？
+# Apoe的表达量比较高，看看Apoe和Trem2的相关系数如何。看来Apoe和Trem2的相关系数不是很高。
+# 所以还是不能用Apoe和Lpl来代表DAM。
+cor.test(meta.sub$Trem2, meta.sub$Apoe, method="spearman") # 0.148
+cor.test(meta.sub$Trem2, meta.sub$Tyrobp, method="spearman") # 0.42
+cor.test(meta.sub$Trem2, meta.sub$Ctsd, method="spearman") # 0.42
+cor.test(meta.sub$Trem2, meta.sub$Lpl, method="spearman") # 0.13
+DAM.markers <- c("Trem2", "Tyrobp", "Ctsd")
+
+# 查看几个HOM markers之间的相关系数。
+cor.test(meta.sub$P2ry12, meta.sub$Tmem119, method="spearman") # 0.167
+cor.test(meta.sub$P2ry12, meta.sub$Cx3cr1, method="spearman") # 0.173
+cor.test(meta.sub$P2ry12, meta.sub$Cd33, method="spearman") # 0.07
+HOM.markers <- c("P2ry12", "Tmem119", "Cx3cr1")
+
+meta.sub <- data.frame(meta.sub)
+meta.sub$DAM_index <- rowSums(meta.sub[, DAM.markers])
+meta.sub$HOM_index <- rowSums(meta.sub[, HOM.markers])
+
+meta.sub$DAM_HOM_ratio <- meta.sub$DAM_index / meta.sub$HOM_index
+
+# cor.test(meta.sub$DAM_index, meta.sub$Abeta_index, method="spearman")
+p <- ggplot(meta.sub, aes(Abeta_index, DAM_index, color=treatment)) + 
+  geom_point() + geom_smooth(method="lm") + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_DAM_index.png", p, width=7, height=3)
+
+#---------------------------------------------------
+# 计算(DAM:HOM)~Aβ
+expr.df <- data.frame(t(as.matrix(expr[c("Thy1", "Trem2", "Tmem119"), ])))
+meta.sub <- cbind(meta[, c("treatment", "cell_types", "Abeta_index", "batch")], expr.df)
+meta.agg <- aggregate(.~treatment+batch+cell_types, FUN=mean, data=meta.sub)
+meta.agg$DAM_HOM_ratio <- meta.agg$Trem2 / meta.agg$Tmem119
+
+# 各脑区的DAM:HOM ratio比较。主要是比较Fiber tract的DAM_HOM ratio在PL vs AD中的差异。
+p <- ggplot(meta.agg, aes(cell_types, DAM_HOM_ratio)) +
+  geom_col(aes(fill=treatment), position="dodge") +
+  facet_grid(batch~.) + theme(axis.text.x=element_text(angle=30))
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_DAM_HOM_ratio_each_region.png", p, width=7, height=6)
+
+
+
+mycolorcode = c("Isocortex"="#666666",
+                "Fiber tracts"="#E7298A",
+                "Thalamus"="#FF7F00",
+                "Olfactory area"="#E41A1C",
+                "Hypothalamus"="#377EB8",
+                "Hippocampus"="#4DAF4A",
+                "Cortical subplate"="#A65628",
+                "Meninges"="#80B1D3",
+                "Striatum"="#B3DE69",
+                "Lateral Ventricle"="#D9D9D9",
+                "Third Ventricle"="#BC80BD",
+                "C12"="#FFED6F")
+
+
+
+# 两个批次分开
+meta.agg.filt <- subset(meta.agg, !cell_types %in% c("Lateral Ventricle", "Meninges", "Fiber tracts")) #这两个脑区假荧光信号很多，去掉。
+# fiber tract 的DAM:HOM ratio异常地高，去掉试试。如果去掉Fiber tracts，那pvalue就小多了。
+# 可是没有合适的理由把这个脑区去掉。Fiber tracts的高DAM:HOM ratio或许有很大的生物学意义。首先我们在SC中观察到Oligo的表达发生了很多变化，此外，在药物处理后，Fiber tracts下降的Aβ指数也多。
+library(ggrepel)
+p <- ggplot(meta.agg.filt, aes(Abeta_index, DAM_HOM_ratio)) + 
+  stat_smooth(aes(color=treatment), method="lm") + 
+  # scale_color_manual(values=mycolorcode) + 
+  geom_point(aes(color=treatment)) + 
+  geom_text_repel(aes(label=cell_types)) + 
+  facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_DAM_HOM_ratio.png", p, width=7, height=3)
+
+# 计算相关系数
+Batch <- 1
+PL.Abeta <- subset(meta.agg.filt, treatment=="PLX5622" & batch==Batch,
+                   select="Abeta_index", drop=T)
+AD.Abeta <- subset(meta.agg.filt, treatment=="FADCtrl" & batch==Batch, 
+                   select="Abeta_index", drop=T)
+PL.ratio <- subset(meta.agg.filt, treatment=="PLX5622" & batch==Batch, 
+                   select="DAM_HOM_ratio", drop=T)
+AD.ratio <- subset(meta.agg.filt, treatment=="FADCtrl" & batch==Batch, 
+                   select="DAM_HOM_ratio", drop=T)
+PL.cor <- cor.test(PL.Abeta, PL.ratio, method="spearman") # b1: rho=0.5166667, p-value=0.1618; b2: 0.5166667, 0.1618
+AD.cor <- cor.test(AD.Abeta, AD.ratio, method="spearman") # b1: rho=0.8, p=0.01383; b2: 0.6833333, 0.05032
+# 使用lm
+m <- lm(PL.ratio~PL.Abeta)
+summary(m) # b1: Estimate=0.5580, p=0.3177; b2: 0.3500, 0.224
+m <- lm(AD.ratio~AD.Abeta)
+summary(m) # b1: Estimate=0.18889, p=0.02338; b2: 0.10090, 0.0837
+
+# 两个批次合并
+meta.agg2 <- aggregate(cbind(DAM_HOM_ratio, Abeta_index)~treatment+cell_types, FUN=mean, data=meta.agg)
+meta.agg2.filt <- subset(meta.agg2, !cell_types %in% c("Lateral Ventricle", "Meninges")) #这两个脑区假荧光信号很多，去掉。
+p <- ggplot(meta.agg2.filt, aes(Abeta_index, DAM_HOM_ratio, color=treatment)) + 
+  stat_smooth(method="lm") + 
+  geom_point()
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_DAM_HOM_ratio2.png", p, width=4, height=3)
+# 计算相关系数
+PL.Abeta <- subset(meta.agg2.filt, treatment=="PLX5622", select="Abeta_index", drop=T)
+AD.Abeta <- subset(meta.agg2.filt, treatment=="FADCtrl", select="Abeta_index", drop=T)
+PL.ratio <- subset(meta.agg2.filt, treatment=="PLX5622", select="DAM_HOM_ratio", drop=T)
+AD.ratio <- subset(meta.agg2.filt, treatment=="FADCtrl", select="DAM_HOM_ratio", drop=T)
+PL.cor <- cor.test(PL.Abeta, PL.ratio, method="spearman") # p=0.02549, rho=0.75
+# 使用lm
+m <- lm(PL.ratio~PL.Abeta)
+summary(m) # e=0.4888, p=0.213
+m <- lm(AD.ratio~AD.Abeta)
+summary(m) # e=0.1487, p=0.01815
+
+# 绘制脑区热图
+
+
+# 使用Thy1代替Abeta index，三条线都是平的。
+meta.agg2 <- aggregate(cbind(DAM_HOM_ratio, Thy1)~treatment+cell_types, FUN=mean, data=meta.agg)
+meta.agg2.filt <- subset(meta.agg2, !cell_types %in% c("Lateral Ventricle", "Meninges")) #这两个脑区假荧光信号很多，去掉。
+p <- ggplot(meta.agg2.filt, aes(Thy1, DAM_HOM_ratio, color=treatment)) + 
+  stat_smooth(method="lm") + 
+  geom_point()
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_DAM_HOM_ratio2.Thy1.png", p, width=7, height=3)
+
+#----------------------------------------------------------------------------------
+# 对每个spot进行分析
+# 这样就可能出现很多表达量为0的spots，把这些spots直接去掉应该影响不大。
+meta.sub.filt <- subset(meta.sub, Thy1!=0 & Trem2!=0 & Tmem119!=0 & Abeta_index!=0)
+meta.sub.filt$DAM_HOM_ratio <- meta.sub.filt$Trem2 / meta.sub.filt$Tmem119
+meta.sub.filt <- subset(meta.sub.filt, !cell_types %in% c("Lateral Ventricle", "Meninges"))
+p <- ggplot(meta.sub.filt, aes(Abeta_index, DAM_HOM_ratio, color=treatment)) + 
+  stat_smooth(method="lm") + 
+  geom_point() + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_DAM_HOM_ratio.all_spots.png", p, width=7, height=3)
+
+# 使用Thy1代替Abeta index，效果似乎不好。
+p <- ggplot(meta.sub.filt, aes(Thy1, DAM_HOM_ratio, color=treatment)) + 
+  stat_smooth(method="lm") + 
+  geom_point() + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_DAM_HOM_ratio.all_spots.Thy1.png", p, width=7, height=3)
+
+
+
+```
+
+**结果：**
+
+```{r comp-DAM-Abeta-cor, echo=FALSE, fig.cap="The DAM:HOM ratio increases quicker as Aβ increase in PL. Each point means a brain region. Meninges and Lateral Ventricle are removed because they have much more false fluorescent signal. The two panels are corresponding to the two batch. "}
+knitr::include_graphics("data/st/010/compare_DAM_HOM_ratio.png")
+```
+
+#### Aβ~Aβ decrease rate
+
+计算每个脑区的平均Aβ指数下降值，调查该下降值与脑区原来的Aβ指数的关系。
+
+```{r eval=FALSE}
+
+meta.agg <- aggregate(Abeta_index~treatment+batch+cell_types, FUN=mean, data=meta)
+meta.agg <- meta.agg[meta.agg$cell_types != "C12", ]
+meta.agg.pl <- meta.agg[meta.agg$treatment == "PLX5622", ]
+meta.agg.ad <- meta.agg[meta.agg$treatment == "FADCtrl", ]
+colnames(meta.agg.pl) <- sub("Abeta_index", "Abeta_index.PL", colnames(meta.agg.pl))
+colnames(meta.agg.ad) <- sub("Abeta_index", "Abeta_index.AD", colnames(meta.agg.ad))
+meta.agg2 <- merge(meta.agg.pl, meta.agg.ad, by=c("batch", "cell_types"))
+meta.agg2$delta_Abeta <- meta.agg2$Abeta_index.AD - meta.agg2$Abeta_index.PL
+
+p <- ggplot(meta.agg2, aes(Abeta_index.AD, delta_Abeta)) + geom_point() +
+  geom_point(data=subset(meta.agg2, cell_types=="Fiber tracts"), 
+             aes(Abeta_index.AD, delta_Abeta), color="red") + 
+  geom_text_repel(data=subset(meta.agg2, cell_types=="Fiber tracts"),
+                  aes(Abeta_index.AD, delta_Abeta, label=cell_types), 
+                  min.segment.length = 1, nudge_x = 0.1, direction = "y") + 
+  geom_smooth(method="lm") + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_Abeta_decrease_rate.png", p, width=7, height=3)
+
+# 计算相关系数、lm
+delta_Abeta.1 <- subset(meta.agg2, batch=="1", select="delta_Abeta", drop=T)
+delta_Abeta.2 <- subset(meta.agg2, batch=="2", select="delta_Abeta", drop=T)
+Abeta_index.1 <- subset(meta.agg2, batch=="1", select="Abeta_index.AD", drop=T)
+Abeta_index.2 <- subset(meta.agg2, batch=="2", select="Abeta_index.AD", drop=T)
+m <- lm(delta_Abeta.1 ~ Abeta_index.1)
+summary(m) # e=0.50531, p=0.00232
+m <- lm(delta_Abeta.2 ~ Abeta_index.2)
+summary(m) # e=0.3666, p=0.294
+
+#-----------------------------------------------------------------------------
+# 直接计算Aβ下降值与DAM的相关性。
+meta.agg <- aggregate(cbind(Abeta_index, Trem2)~treatment+batch+cell_types, FUN=mean, data=meta.sub)
+meta.agg <- meta.agg[meta.agg$cell_types != "C12", ]
+meta.agg.pl <- meta.agg[meta.agg$treatment == "PLX5622", ]
+meta.agg.ad <- meta.agg[meta.agg$treatment == "FADCtrl", ]
+colnames(meta.agg.pl) <- c("treatment", "batch", "cell_types", "Abeta_index.PL", "Trem2.PL")
+colnames(meta.agg.ad) <- c("treatment", "batch", "cell_types", "Abeta_index.AD", "Trem2.AD")
+meta.agg2 <- merge(meta.agg.pl, meta.agg.ad, by=c("batch", "cell_types"))
+meta.agg2$delta_Abeta <- meta.agg2$Abeta_index.AD - meta.agg2$Abeta_index.PL
+
+delta_Abeta.1 <- subset(meta.agg2, batch=="1", select="delta_Abeta", drop=T)
+delta_Abeta.2 <- subset(meta.agg2, batch=="2", select="delta_Abeta", drop=T)
+Trem2.1 <- subset(meta.agg2, batch=="1", select="Trem2.PL", drop=T)
+Trem2.2 <- subset(meta.agg2, batch=="2", select="Trem2.PL", drop=T)
+m <- lm(delta_Abeta.1 ~ Trem2.1)
+summary(m) # e=2.831, p=0.616
+m <- lm(delta_Abeta.2 ~ Trem2.2)
+summary(m) # e=35.462, p=0.08422
+
+p <- ggplot(meta.agg2, aes(Trem2.PL, delta_Abeta)) + geom_point() +
+  geom_point(data=subset(meta.agg2, cell_types=="Fiber tracts"), 
+             aes(Trem2.PL, delta_Abeta), color="red") + 
+  geom_text_repel(data=subset(meta.agg2, cell_types=="Fiber tracts"),
+                  aes(Trem2.PL, delta_Abeta, label=cell_types), 
+                  min.segment.length = 1, nudge_x = 0.1, direction = "y") + 
+  geom_smooth(method="lm") + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_Abeta_decrease_rate_Trem2.png", p, width=7, height=3)
+
+#-----------------------------------------------------------------------------
+# 计算Aβ下降值与DAM:HOM ratio的相关性。
+meta.agg <- aggregate(cbind(Abeta_index, Trem2, Tmem119)~treatment+batch+cell_types, FUN=mean, data=meta.sub)
+meta.agg <- meta.agg[meta.agg$cell_types != "C12", ]
+meta.agg.pl <- meta.agg[meta.agg$treatment == "PLX5622", ]
+meta.agg.ad <- meta.agg[meta.agg$treatment == "FADCtrl", ]
+colnames(meta.agg.pl) <- c("treatment", "batch", "cell_types", "Abeta_index.PL", "Trem2.PL", "Tmem119.PL")
+colnames(meta.agg.ad) <- c("treatment", "batch", "cell_types", "Abeta_index.AD", "Trem2.AD", "Tmem119.AD")
+meta.agg2 <- merge(meta.agg.pl, meta.agg.ad, by=c("batch", "cell_types"))
+meta.agg2$delta_Abeta <- meta.agg2$Abeta_index.AD - meta.agg2$Abeta_index.PL
+meta.agg2$HOM_DAM_ratio <- meta.agg2$Trem2.PL / meta.agg2$Tmem119.PL
+  
+delta_Abeta.1 <- subset(meta.agg2, batch=="1", select="delta_Abeta", drop=T)
+delta_Abeta.2 <- subset(meta.agg2, batch=="2", select="delta_Abeta", drop=T)
+HOM_DAM_ratio.1 <- subset(meta.agg2, batch=="1", select="HOM_DAM_ratio", drop=T)
+HOM_DAM_ratio.2 <- subset(meta.agg2, batch=="2", select="HOM_DAM_ratio", drop=T)
+m <- lm(delta_Abeta.1 ~ HOM_DAM_ratio.1)
+summary(m) # e=-0.1550, p=0.4555
+m <- lm(delta_Abeta.2 ~ HOM_DAM_ratio.2)
+summary(m) # e=1.4928, p=0.0110
+
+p <- ggplot(meta.agg2, aes(HOM_DAM_ratio, delta_Abeta)) + geom_point() +
+  geom_point(data=subset(meta.agg2, cell_types=="Fiber tracts"), 
+             aes(HOM_DAM_ratio, delta_Abeta), color="red") + 
+  geom_text_repel(data=subset(meta.agg2, cell_types=="Fiber tracts"),
+                  aes(HOM_DAM_ratio, delta_Abeta, label=cell_types), 
+                  min.segment.length = 1, nudge_x = 0.1, direction = "y") + 
+  geom_smooth(method="lm") + facet_grid(.~batch)
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_Abeta_decrease_rate_HOM_DAM_ratio.png", p, width=7, height=3)
+
+# 结果表明，两个批次的差异比较大。batch1中delta Aβ与DAM:HOM ratio没有显著关系；而在batch2中，delta Aβ与DAM_HOM_ratio呈正相关。
+```
+
+**结果：**
+
+```{r comp-Abeta-decreate-rate, echo=FALSE, fig.cap="The brain regions that have higher mean Abeta index, also have a higher A beta decrease rate. This may suggest that the clearance efficiency is improved by DAM redistribution. "}
+knitr::include_graphics("data/st/010/compare_Abeta_decrease_rate.png")
+```
+
+比较Aβ多的区域的DAM的表达量与Aβ少的区域的表达量的倍数差异。
+
+```{r}
+# 使用“处理特有的PIGs”中的meta
+DAM.markers <- c("Trem2", "Tyrobp", "Ctsd")
+HOM.markers <- c("P2ry12", "Tmem119", "Cx3cr1")
+expr.df <- data.frame(t(as.matrix(expr[c(DAM.markers, HOM.markers), ])))
+meta <- data.frame(meta)
+meta.sub <- cbind(meta[, c("treatment", "cell_types", "Abeta_index", "batch", "Abeta_pos")], expr.df)
+meta.agg <- aggregate(cbind(Trem2, Tyrobp, Ctsd, P2ry12, Tmem119, Cx3cr1)~treatment+batch+Abeta_pos, FUN=mean, data=meta.sub)
+meta.agg$DAM_HOM_ratio <- meta.agg$Trem2 / meta.agg$Tmem119
+meta.agg.PL <- subset(meta.agg, treatment=="PLX5622")
+meta.agg.AD <- subset(meta.agg, treatment=="FADCtrl")
+
+# Abeta pos DAM vs Abeta neg DAM 
+# PL, batch2
+Batch=2
+a <- subset(meta.agg.PL, batch==Batch & Abeta_pos=="pos", select="Trem2", drop=T)
+b <- subset(meta.agg.PL, batch==Batch & Abeta_pos=="neg", select="Trem2", drop=T)
+print(a/b)
+a <- subset(meta.agg.AD, batch==Batch & Abeta_pos=="pos", select="Trem2", drop=T)
+b <- subset(meta.agg.AD, batch==Batch & Abeta_pos=="neg", select="Trem2", drop=T)
+print(a/b)
+
+# batch1: 1.627093, 1.751701
+# batch2: 1.763059, 1.630209
+# 并没有明显的差异。
+
+pl <- c(1.627093, 1.763059)
+ad <- c(1.751701, 1.630209)
+t.test(ad, pl, paired=T)
+
+# Abeta pos DAM:HOM vs Abeta neg DAM:HOM
+Batch=1
+a <- subset(meta.agg.PL, batch==Batch & Abeta_pos=="pos", select="DAM_HOM_ratio", drop=T)
+b <- subset(meta.agg.PL, batch==Batch & Abeta_pos=="neg", select="DAM_HOM_ratio", drop=T)
+print(a/b)
+a <- subset(meta.agg.AD, batch==Batch & Abeta_pos=="pos", select="DAM_HOM_ratio", drop=T)
+b <- subset(meta.agg.AD, batch==Batch & Abeta_pos=="neg", select="DAM_HOM_ratio", drop=T)
+print(a/b)
+# AD组的Aβ富集区域，DAM:HOM反而比PL组的更高
+
+# 按脑区来调查DAM:HOM ratio？
+meta.agg <- aggregate(cbind(Trem2, Tyrobp, Ctsd, P2ry12, Tmem119, Cx3cr1)~treatment+cell_types, FUN=mean, data=meta.sub)
+meta.agg$DAM_HOM_ratio <- meta.agg$Trem2 / meta.agg$Tmem119
+for (BR in unique(meta.agg$cell_types)){
+  print(BR)
+  meta.agg.PL <- subset(meta.agg, treatment=="PLX5622" & cell_types==BR)
+  meta.agg.AD <- subset(meta.agg, treatment=="FADCtrl" & cell_types==BR)
+  a <- meta.agg.PL[, c("DAM_HOM_ratio"), drop=T]
+  b <- meta.agg.AD[, c("DAM_HOM_ratio"), drop=T]
+  print(a/b)
+  cat("\n")
+}
+
+```
+
+#### 不同脑区DAM:HOM ratio比较
+
+```{r}
+sc.group.rename <- c("FADCtrl"="5xFAD-CTRL", "PLX5622"="5xFAD-PLX", "WTCtrl"="WT-CTRL")
+group.colors <- c("WT-CTRL"="#7570b3", "5xFAD-CTRL"="#d95f02", "5xFAD-PLX"="#1b9e77")
+
+expr <- get_expression_values(testcombo, output="matrix")
+meta <- pDataDT(testcombo)
+meta$treatment <- sc.group.rename[meta$treatment]
+meta$Trem2 <- expr["Trem2", ]
+meta$Tmem119 <- expr["Tmem119", ]
+
+meta.sub <- subset(meta, cell_types != "C12")
+
+meta.agg <- aggregate(cbind(Trem2, Tmem119)~treatment+cell_types, FUN=mean, data=meta.sub)
+meta.agg$DAM_HOM_ratio <- meta.agg$Trem2 / meta.agg$Tmem119
+meta.agg$treatment <- factor(meta.agg$treatment, levels=c("WT-CTRL", "5xFAD-CTRL", "5xFAD-PLX"), ordered=T)
+
+df.ad <- subset(meta.agg, treatment=="5xFAD-CTRL")
+df.pl <- subset(meta.agg, treatment=="5xFAD-PLX")
+df.pl$fold_change <- df.pl$DAM_HOM_ratio / df.ad$DAM_HOM_ratio
+df.pl <- df.pl[order(df.pl$fold_change), ]
+meta.agg$cell_types <- factor(meta.agg$cell_types, levels=df.pl$cell_types, ordered=T)
+
+p <- ggplot(meta.agg, aes(cell_types, DAM_HOM_ratio, fill=treatment)) + 
+  geom_bar(stat="identity", position="dodge") + 
+  labs(x="Brain region", y="DAM:HOM ratio") + 
+  scale_fill_manual(values=group.colors) + 
+  coord_flip() + 
+  theme(panel.background=element_blank(), panel.grid=element_blank(), 
+        text=element_text(size=16, family="Arial"))
+
+ggsave("../001ST/001Giotto_out/010immunofluorescence/merged/DAM_HOM_brain_region.png", p, width=7, height=6)
+
+```
+
+
+不如直接计算DAM和Aβ下降值的相关系数？
+
+我想要证明以下命题的真伪：
+
+1. DAM是否更加集中于Aβ斑块。如何量化DAM富集于Aβ的程度？1. 相关系数。2. Aβ多的区域的DAM的表达量与Aβ少的区域的表达量的倍数差异。
+2. DAM富集的地方，Aβ斑块清除得更多。
+3. DAM较少的地方，神经元受到的损伤较少。
+
+现有的证据是否足够？
+
+讨论：
+
+Abeta指数越高的区域，DAM的比率越高；
+药物处理后，DAM更加富集于Aβ富集的区域。Aβ越多的区域，药物处理后下降的Aβ量也越多。
+Fiber tracts是一个特殊的脑区，药物处理后，其Aβ的量不多，却有高比例的DAM。而药物处理后，其Aβ下降的量也是与AD组中该脑区Aβ的量成正比的。
+ST发现了Oligo2的？调表达；SC发现Oligo有很多基因rescued了。
+DAM为何聚集于Fiber tracts？
+
+经过一番探索，结果显示DAM:HOM的提高是在全脑区范围的，并没有富集于Aβ附近的区域。其中Fiber tracts提升得最多。其次是Striatum和Isocortex。
+
+出现这种现象得原因？1）代偿作用；2）对药物的感受性不同。
+DAM比例的提升是症状缓解的原因吗？
+还是说DAM绝对数目的下降才是原因？TNF炎症因子、吞噬作用等下降。
+如果说DAM的下降减少了对神经元的吞噬，那如何解释Aβ的减少？
+
+Todo: 
+
+把上面两张图的相关系数加上。
+高亮海马区。
+（可选）绘制Abeta指数空间分布、Abeta下降量的空间分布、DAM:HOM ratio的空间分布。
+
+### 5.2 Aβ与星形胶质细胞
+
+#### 脑区、处理间Gfap表达量比较
+
+```{r}
+# 1. 读取Gfap指数到sobj@meta.data。
+# 2. 根据处理、脑区、批次分组求和，然后用spot数和切片总荧光指数进行标准化。
+# 3. 绘图，添加误差线。
+
+samples <- c("FADCtrl_1", "FADCtrl_2", "WTCtrl_1", 
+             "WTCtrl_2", "PLX5622_1", "PLX5622_2")
+
+measure.list <- list()
+n <- 1
+for (sample in samples){
+  # 读取Gfap index数据
+  treatment <- strsplit(sample, "_")[[1]][1]
+  batch <- strsplit(sample, "_")[[1]][2]
+  if (batch=="1"){
+    infile <- file.path("001Giotto_out/010immunofluorescence", 
+                        "measurement", 
+                        treatment, "Results.ch00.reshaped.csv")
+  } else if (batch=="2"){
+    infile <- file.path("001Giotto_out/010immunofluorescence",
+                        "batch2", 
+                        treatment, "Results.ch04.reshaped.csv")
+  }
+  
+  measure <- read.csv(infile, row.names=1)
+  # 把Abeta index合并到metadata中。
+  
+  measure$barcode <- paste0(sample, "-", measure$barcode)
+  row.names(measure) <- measure$barcode
+  measure.list[[n]] <- measure
+  n <- n + 1
+}
+measure.df <- do.call(rbind, measure.list)
+
+meta <- testcombo@cell_metadata$cell$rna@metaDT
+meta$Gfap_index <- measure.df[meta$cell_ID, "Mean"]
+
+meta.agg <- aggregate(Gfap_index~treatment+batch+cell_types, FUN=sum, data=meta)
+meta.agg <- meta.agg[meta.agg$cell_types != "C12", ]
+
+# normalize by sample total Gfap index. 
+sample_sum <- aggregate(Gfap_index~treatment+batch, FUN=sum, data=meta)
+meta.agg$sample <- paste0(meta.agg$treatment, "_", meta.agg$batch)
+row.names(sample_sum) <- paste0(sample_sum$treatment, "_", sample_sum$batch)
+meta.agg$Gfap_index2 <- sapply(1:nrow(meta.agg), function(x){
+  meta.agg[x, "Gfap_index"] / sample_sum[meta.agg[x, "sample"], "Gfap_index"]
+})
+# normalize by brain region nspots. 
+brain_region_nspot <- table(meta$list_ID, meta$cell_types)
+brain_region_nspot <- as.data.frame.matrix(brain_region_nspot)
+
+meta.agg$Gfap_index3 <- sapply(1:nrow(meta.agg), function(x){
+  meta.agg[x, "Gfap_index2"] / brain_region_nspot[meta.agg[x, "sample"], 
+                                                  meta.agg[x, "cell_types"]]
+})
+
+# 绘图
+meta.agg.1 <- meta.agg[meta.agg$batch==1, ]
+meta.agg.1$treatment <- factor(meta.agg.1$treatment, levels=c("WTCtrl", "FADCtrl", "PLX5622"), ordered=T)
+
+meta.agg$treatment <- factor(meta.agg$treatment, 
+                             levels=c("WTCtrl", "FADCtrl", "PLX5622"), ordered=T)
+p <- ggplot(meta.agg, aes(cell_types, Gfap_index3, fill=treatment)) + 
+  geom_col(position="dodge") + facet_grid(.~batch) + 
+  coord_flip()
+
+ggsave("001Giotto_out/010immunofluorescence/merged/compare_Gfap.barplot.png", p)
+
+```
+
+```{r compare-Gfap-barplot, echo=FALSE, fig.cap="immunofluorescent staining supports that Gfap is up regulated in PLX5622 vs FADCtrl in hippocampus. "}
+
+knitr::include_graphics("data/st/010/compare_Gfap.barplot.png")
+
+```
+
+### 5.3 Abeta与神经元
+
+#### Abeta对GABA的影响
+
+把spots分成斑块相关的和远离斑块的，然后根据deconvolution结果比较两类spots的GABA比例有何差别。这个看着比较靠谱。Abeta positive spots在图像分析里面已经做过，现在只需要载入deconvolution的结果，然后比较组间差异即可。
+
+```{r eval=FALSE}
+# 1. 划分Abeta positive spots（可以直接使用“PIGs鉴定”中的代码）
+# 2. 载入deconvolution的结果（直接使用“006deconvolution::把结果整合到Giotto中”的相关代码）
+# 3. 比较组间差异
+
+# a. 整个切片的斑块区域 vs 无斑块区域，GABA比例在药物处理前后的差值没有明显变化。
+meta <- data.frame(meta)
+row.names(meta) <- meta$cell_ID
+spot.anno.prop$Abeta_pos <- meta[spot.anno.prop$cell.id, "Abeta_pos"]
+
+data.agg <- aggregate(GABA~Abeta_pos+sample, FUN=mean, data=spot.anno.prop)
+
+library(ggplot2)
+data.agg$treatment <- sapply(strsplit(data.agg$sample, "_"), "[", 1)
+data.agg.mean <- aggregate(GABA~Abeta_pos+treatment, FUN=mean, data=data.agg)
+data.agg.sd <- aggregate(GABA~Abeta_pos+treatment, FUN=sd, data=data.agg)
+data.agg <- merge(data.agg.mean, data.agg.sd, by=c("Abeta_pos", "treatment"))
+colnames(data.agg) <- c("Abeta_pos", "treatment", "Mean", "Sd")
+p <- ggplot(data.agg, aes(treatment, Mean, fill=Abeta_pos)) + 
+  geom_errorbar(aes(ymin=Mean-Sd, ymax=Mean+Sd, group=Abeta_pos), position="dodge") +
+  geom_col(position="dodge")
+ggsave("001Giotto_out/010immunofluorescence/merged/Abeta_GABA.barplot.png", p)
+
+# 需要分不同脑区来看。现在看到的pos和neg之间的差异，可能是因为pos所在的脑区刚好是GABA含量比较少的区域。
+# b. 分开脑区看，斑块区域 vs 无斑块区域，GABA比例在药物处理前后的差值没有明显变化。
+
+# Hypothalamus、Cortical subplate两个脑区，neg区域比pos区域有更高的GABA比例，可能只是由于pos区域主要是切片边缘的Abeta假阳性信号，在切片边缘，GABA的比例肯定比较低。
+data.agg <- aggregate(GABA~Abeta_pos+sample+brain.region, FUN=mean, data=spot.anno.prop)
+
+data.agg$treatment <- sapply(strsplit(data.agg$sample, "_"), "[", 1)
+data.agg.mean <- aggregate(GABA~Abeta_pos+treatment+brain.region, 
+                           FUN=mean, data=data.agg)
+data.agg.sd <- aggregate(GABA~Abeta_pos+treatment+brain.region, FUN=sd, data=data.agg)
+data.agg <- merge(data.agg.mean, data.agg.sd, 
+                  by=c("Abeta_pos", "treatment", "brain.region"))
+colnames(data.agg) <- c("Abeta_pos", "treatment", "brain.region", "Mean", "Sd")
+p <- ggplot(data.agg, aes(treatment, Mean, fill=Abeta_pos)) + 
+  geom_errorbar(aes(ymin=Mean-Sd, ymax=Mean+Sd, group=Abeta_pos), position="dodge") +
+  geom_col(position="dodge") + facet_wrap(.~brain.region, ncol=4)
+ggsave("001Giotto_out/010immunofluorescence/merged/Abeta_GABA.each_region.barplot.png", p, width=4*4, height=3*3)
+
+
+# c. Olfactory area、Cortical subplate、Thalamus、Isocortex等受到Abeta影响严重的区域 vs Fiber tracts、hypothalamus等受Abeta影响较小的区域，GABA比例在药物处理前后的差值没有明显变化。
+```
+
+#### Abeta~GABA/Glu
+
+Aβ所在脑区以GABA为主？Aβ（Thy1）与GABA的相关性分析 vs Thy1~Glu。
+
+```{r}
+
+setwd("../001ST/")
+source("script/load_checkpoint.r")
+expr <- get_expression_values(testcombo, output="matrix")
+
+GABA.markers <- c("Gad1", "Gad2", "Slc32a1", "Atp1a3", "Atp1b1") # GABA合成基因(GAD1, GAD2, Slc32a1, Atp1a3, Atp1b1)，而不是GABA受体基因。或者deconvolution结果。
+Glu.markers <- c("Slc17a6", "Slc17a7", "Satb2", "Cux2") # Glu合成、转运基因（VGLUT1, VGLUT2, Slc17a6, Slc17a7, Satb2, Cux2），而不是GABA受体基因。或者deconvolution结果。
+
+# GABA和Glu的deconvolution 结果
+deconvo <- read.csv("001Giotto_out/cell2location/level2/spot.anno.prop.csv", row.names=1)
+
+all(deconvo$cell.id == pDataDT(testcombo)$cell_ID)
+row.names(deconvo) <- deconvo$cell.id
+deconvo <- deconvo[pDataDT(testcombo)$cell_ID, ]
+
+Thy1.expr <- as.vector(expr["Thy1", ])
+
+outdir <- "001Giotto_out/010immunofluorescence/EI/"
+dir.create(outdir)
+
+# 与GABA/Glu 标记基因进行相关性分析。
+v1 <- c() # 神经元类型
+v2 <- c() # 标记基因
+v3 <- c() # e
+v4 <- c() # p
+for (ct in c("Glu", "GABA")){
+  if (ct == "Glu") {
+    markers <- Glu.markers
+  } else {
+    markers <- GABA.markers
+  }
+  for (g in markers) {
+    g.expr <- as.vector(expr[g, ])
+    v1 <- c(v1, ct)
+    v2 <- c(v2, g)
+    o <- cor.test(Thy1.expr, g.expr, method="spearman")
+    v3 <- c(v3, o$p.value)
+    v4 <- c(v4, o$estimate)
+  }
+}
+
+df <- data.frame(cell_type=v1, pvalue=v2, rho=v3)
+write.csv(df, paste0(outdir, "/Glu_GABA_markers~Thy1.csv"))
+
+# 与GABA/Glu 空间分布进行相关性分析
+v1 <- c() # 神经元类型
+v2 <- c() # e
+v3 <- c() # p
+for (i in c("Glu", "GABA")){
+  cts <- grep(i, colnames(deconvo), value=T)
+  for (ct in cts) {
+    o <- cor.test(Thy1.expr, deconvo[[ct]], method="spearman")
+    v1 <- c(v1, ct)
+    v2 <- c(v2, o$p.value)
+    v3 <- c(v3, o$estimate)
+  }
+}
+df2 <- data.frame(cell_type=v1, pvalue=v2, rho=v3)
+write.csv(df2, paste0(outdir, "/Glu_GABA_deconvo~Thy1.csv"))
+```
+
+### 5.4 Aβ与氧化磷酸化
+
+#### Aβ~OXPHOS change
+
+不同的氧化磷酸化相关DEGs具有不同的空间表达分布，但是它们在PL组比AD组的变化或许是具有脑区分布的一致性的。也就是说，都在某个脑区变化得比较大，而在另外一些脑区变化得比较小。
+
+我们可以使用log2fc或者-log10pvalue来代表基因表达变化。可以用Aβindex来代表Aβ_plaque的量。然后按照脑区来进行相关性分析。由于有效的脑区只有8个左右，得到的结果可能在统计学显著性上欠缺。可以考虑使用更大的分辨率进行聚类，然后计算每一个小类中的log2fc和Aβ index，再进行相关性分析。
+
+氧化磷酸化基因之间的log2fc相关性也可以分析一下。
+
+```{r}
+st.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+
+st.DEGs.gene <- subset(st.DEGs, gene=="mt-Atp8" & comparison=="PLX5622_vs_FADCtrl")
+# 这个表格中，部分脑区并没有log2fc，因为差异不显著。
+# 处理方法1. 填充0.
+# 处理方法2：使用真实的log2fc。
+
+brain_regions <- unique(st.DEGs$brain_region)
+
+library(reshape2)
+
+get_lfc <- function(gene){
+  gene.lfc <- c()
+  for (br in brain_regions) {
+    df <- read.csv(paste0("../001ST/001Giotto_out/003DEGs/wilcox/", br, ".PLX5622_vs_FADCtrl.csv"), row.names=1)
+    lfc <- df[gene, "avg_log2FC"]
+    gene.lfc <- c(gene.lfc, lfc)
+  }
+  return(gene.lfc)
+}
+
+# log2fc之间的相关性。
+gene <- "Ndufa3"
+gene2 <- "mt-Atp8"
+
+# workdir: docker:/home/mouse_ad/001ST
+source("script/load_checkpoint.r")
+expr.st <- get_expression_values(testcombo, output="matrix")
+meta.st <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta.csv", row.names=1)
+
+for (gene in c("mt-Nd1", "mt-Nd5", "mt-Nd4l", "mt-Nd2", "mt-Nd3", "mt-Nd4", "mt-Co3", "mt-Atp6", "Ndufa3", "Ndufa5", "Cox8a", "Cox7c")){
+
+gene.lfc <- get_lfc(gene)
+gene.lfc[is.na(gene.lfc)] <- 0
+gene.lfc.1 <- get_lfc(gene2)
+out <- cor.test(gene.lfc, gene.lfc.1, method="spearman")
+print(paste0(gene, ", log2fc~log2fc, pvalue=", out$p.value, ", rho=", out$estimate))
+
+# 空间共表达相关性。
+meta.st[[gene]] <- expr.st[gene, ]
+meta.st[[gene2]] <- expr.st[gene2, ]
+
+
+meta.st.long <- melt(meta.st, id.vars=c("list_ID", "cell_types"), 
+                     measure.vars=c("Abeta_index", gene, gene2), 
+                     variable.name="gene", value.name="expr")
+
+meta.st.agg <- aggregate(expr~list_ID + cell_types + gene, FUN=mean, data=meta.st.long)
+
+df1 <- meta.st.agg[meta.st.agg$gene==gene & meta.st.agg$list_ID=="PLX5622_1", ]
+df2 <- meta.st.agg[meta.st.agg$gene==gene2 & meta.st.agg$list_ID=="PLX5622_1", ]
+df.abeta.PL1 <- meta.st.agg[meta.st.agg$gene=="Abeta_index" & meta.st.agg$list_ID=="PLX5622_1", ]
+df.abeta.PL2 <- meta.st.agg[meta.st.agg$gene=="Abeta_index" & meta.st.agg$list_ID=="PLX5622_2", ]
+df.abeta.AD1 <- meta.st.agg[meta.st.agg$gene=="Abeta_index" & meta.st.agg$list_ID=="FADCtrl_1", ]
+df.abeta.AD2 <- meta.st.agg[meta.st.agg$gene=="Abeta_index" & meta.st.agg$list_ID=="FADCtrl_2", ]
+
+# 假设PL1 vs AD1和PL2 vs AD2两个比较组合发生的总表达变化是一样的。
+df.abeta.1 <- df.abeta.AD1
+df.abeta.1$expr <- df.abeta.AD1$expr - df.abeta.PL1$expr
+df.abeta.2 <- df.abeta.AD2
+df.abeta.2$expr <- df.abeta.AD2$expr - df.abeta.PL2$expr
+
+# > df.abeta.1
+#      list_ID        cell_types        gene      expr
+# 2  FADCtrl_1 Cortical subplate Abeta_index 1.8973565
+# 8  FADCtrl_1      Fiber tracts Abeta_index 1.9556671
+# 14 FADCtrl_1       Hippocampus Abeta_index 1.4335245
+# 20 FADCtrl_1      Hypothalamus Abeta_index 0.2324037
+# 26 FADCtrl_1         Isocortex Abeta_index 3.6700273
+# 32 FADCtrl_1 Lateral Ventricle Abeta_index 1.4091005
+# 38 FADCtrl_1          Meninges Abeta_index 7.7983876
+# 44 FADCtrl_1    Olfactory area Abeta_index 4.0575628
+# 50 FADCtrl_1          Striatum Abeta_index 0.7580066
+# 56 FADCtrl_1          Thalamus Abeta_index 3.1752780
+# 62 FADCtrl_1   Third Ventricle Abeta_index 3.8966669
+# 
+# > df.abeta.2
+#      list_ID        cell_types        gene         expr
+# 3  FADCtrl_2 Cortical subplate Abeta_index   2.36257067
+# 9  FADCtrl_2      Fiber tracts Abeta_index  14.75602615
+# 15 FADCtrl_2       Hippocampus Abeta_index   0.07551936
+# 21 FADCtrl_2      Hypothalamus Abeta_index  -2.36738140
+# 27 FADCtrl_2         Isocortex Abeta_index  -3.18307190
+# 33 FADCtrl_2 Lateral Ventricle Abeta_index  -7.61083895
+# 39 FADCtrl_2          Meninges Abeta_index -16.79609611
+# 45 FADCtrl_2    Olfactory area Abeta_index  10.72963423
+# 51 FADCtrl_2          Striatum Abeta_index   4.69579027
+# 57 FADCtrl_2          Thalamus Abeta_index   2.54016440
+# 63 FADCtrl_2   Third Ventricle Abeta_index  -4.20652222
+
+# 两个批次之间的delta_abeta_index差异太大。可能与图像的质量相关。
+
+
+out <- cor.test(df1$expr, df2$expr, method="spearman")
+print(paste0(gene, ", expr~expr, pvalue=", out$p.value, ", rho=", out$estimate))
+
+out <- cor.test(df1$expr, df.abeta$expr, method="spearman")
+print(paste0(gene, ", expr~Abeta, pvalue=", out$p.value, ", rho=", out$estimate))
+
+df.lfc <- data.frame(cell_types=brain_regions, lfc=gene.lfc)
+df.merge <- merge(df.lfc, df.abeta, by="cell_types")
+out <- cor.test(df.merge$lfc, df.merge$expr, method="spearman")
+print(paste0(gene, ", log2fc~Abeta, pvalue=", out$p.value, ", rho=", out$estimate))
+
+# OXPHOS gene fold change ~ Abeta_index fold change
+
+cat("\n")
+}
+
+# [1] "mt-Nd1~log2fc, pvalue=0.0308508738328496, rho=0.663636363636364"
+# [1] "mt-Nd1~expr, pvalue=0.0031151751422363, rho=0.827272727272727"
+# [1] "mt-Nd1~Abeta, pvalue=0.12142915576969, rho=0.5"
+
+# [1] "mt-Nd5~log2fc, pvalue=0.0031151751422363, rho=0.827272727272727"
+# [1] "mt-Nd5~expr, pvalue=0, rho=0.936363636363636"
+# [1] "mt-Nd5~Abeta, pvalue=0.0815541216928155, rho=0.554545454545455"
+
+# [1] "mt-Nd4l~log2fc, pvalue=0.00442801687615523, rho=0.809090909090909"
+# [1] "mt-Nd4l~expr, pvalue=0, rho=0.954545454545455"
+# [1] "mt-Nd4l~Abeta, pvalue=0.236519264676913, rho=0.390909090909091"
+
+# [1] "mt-Nd2~log2fc, pvalue=0.0104817749990729, rho=0.754545454545455"
+# [1] "mt-Nd2~expr, pvalue=0, rho=0.936363636363636"
+# [1] "mt-Nd2~Abeta, pvalue=0.0815541216928155, rho=0.554545454545455"
+
+# [1] "mt-Nd3~log2fc, pvalue=0, rho=0.918181818181818"
+# [1] "mt-Nd3~expr, pvalue=0.00256466229904208, rho=0.836363636363636"
+# [1] "mt-Nd3~Abeta, pvalue=0.225014088667236, rho=0.4"
+
+# [1] "mt-Nd4~log2fc, pvalue=0.0254755837807706, rho=0.681818181818182"
+# [1] "mt-Nd4~expr, pvalue=0.000225324584283125, rho=0.9"
+# [1] "mt-Nd4~Abeta, pvalue=0.172786506584626, rho=0.445454545454545"
+
+# [1] "mt-Co3~log2fc, pvalue=0.000884153869770606, rho=0.851393052514601"
+# [1] "mt-Co3~expr, pvalue=0.000948977059617062, rho=0.872727272727273"
+# [1] "mt-Co3~Abeta, pvalue=0.248380568071137, rho=0.381818181818182"
+
+# [1] "mt-Atp6~log2fc, pvalue=0.0114567316577406, rho=0.725777684110807"
+# [1] "mt-Atp6~expr, pvalue=5.55408265736478e-05, rho=0.909090909090909"
+# [1] "mt-Atp6~Abeta, pvalue=0.106918151178142, rho=0.518181818181818"
+
+# [1] "Ndufa3~log2fc, pvalue=0.380889759521277, rho=0.293590337367029"
+# [1] "Ndufa3~expr, pvalue=0.0403864039827663, rho=0.636363636363636"
+# [1] "Ndufa3~Abeta, pvalue=0.653538937959263, rho=0.154545454545455"
+
+# [1] "Ndufa5~log2fc, pvalue=0.091991920043484, rho=0.532132486477741"
+# [1] "Ndufa5~expr, pvalue=0.468183503088795, rho=0.245454545454545"
+# [1] "Ndufa5~Abeta, pvalue=0.503066960517545, rho=-0.227272727272727"
+
+# [1] "Cox8a~log2fc, pvalue=0.179847045399238, rho=0.436199805445017"
+# [1] "Cox8a~expr, pvalue=0.182531860964529, rho=0.436363636363636"
+# [1] "Cox8a~Abeta, pvalue=0.576257826919622, rho=0.190909090909091"
+
+# [1] "Cox7c~log2fc, pvalue=0.0444240278542043, rho=0.614119578862991"
+# [1] "Cox7c~expr, pvalue=0.0280703042358757, rho=0.672727272727273"
+# [1] "Cox7c~Abeta, pvalue=0.371067789395025, rho=0.3"
+
+
+# 候选基因（lfc相关系数的pvalue小于表达里量相关系数的）：log2fc(mt-Atp8) ~ log2fc(mt-Nd3)比expr(mt-Atp8) ~ expr(mt-Nd3)更显著, Ndufa5
+# log2fc(mt-Atp8)~Abeta_index没有任何基因有显著相关，连还没有进行多重检验矫正之前都没有。
+
+# 结论：氧化磷酸化的改变有脑区特异性，但是并非与Aβ关联。
+
+# 绘制图片：
+# log2fc(mt-Nd3) ~ log2fc(mt-Atp8)
+# expr(mt-Atp8) ~ expr(mt-Nd3)
+# log2fc(mt-Atp8) ~ expr(mt-Nd3)
+# expr(mt-Atp8) ~ log2fc(mt-Nd3)
+# 把点放大，用点的颜色代表脑区，或许效果更好。
+
+gene1 <- "mt-Atp8"
+gene2 <- "mt-Nd3"
+gene2 <- "Ndufa5"
+gene2 <- "Ndufa3"
+gene2 <- "Cox7c"
+
+meta.st[[gene1]] <- expr.st[gene1, ]
+meta.st[[gene2]] <- expr.st[gene2, ]
+meta.st.long2 <- melt(meta.st, id.vars=c("treatment", "cell_types"), 
+                     measure.vars=c("Abeta_index", gene1, gene2), 
+                     variable.name="gene", value.name="expr")
+meta.st.agg2 <- aggregate(expr~treatment + cell_types + gene, FUN=mean,
+                          data=meta.st.long2)
+df1 <- meta.st.agg2[meta.st.agg2$gene==gene1 & meta.st.agg2$treatment=="PLX5622", ]
+df2 <- meta.st.agg2[meta.st.agg2$gene==gene2 & meta.st.agg2$treatment=="PLX5622", ]
+
+outdir <- "001Giotto_out/010immunofluorescence/OXPHOS"
+dir.create(outdir)
+
+
+lfc1 <- get_lfc(gene1)
+lfc2 <- get_lfc(gene2)
+df.expr <- data.frame(brain_region=df1$cell_types, expr1=df1$expr, expr2=df2$expr)
+row.names(df.expr) <- df.expr$brain_region
+df.expr <- df.expr[brain_regions, ]
+df.expr$lfc1 <- lfc1
+df.expr$lfc2 <- lfc2
+
+o1 <- cor.test(df.expr$lfc1, df.expr$lfc2, method="spearman") # p=0, rho=0.9181818
+o2 <- cor.test(df.expr$expr1, df.expr$lfc2, method="spearman") # p=0.002078, rho=0.8454545
+o3 <- cor.test(df.expr$lfc1, df.expr$expr2, method="spearman") # p=0.0168, rho=0.7181818
+
+mycolorcode = c("Isocortex"="#666666",
+                "Fiber tracts"="#E7298A",
+                "Thalamus"="#FF7F00",
+                "Olfactory area"="#E41A1C",
+                "Hypothalamus"="#377EB8",
+                "Hippocampus"="#4DAF4A",
+                "Cortical subplate"="#A65628",
+                "Meninges"="#80B1D3",
+                "Striatum"="#B3DE69",
+                "Lateral Ventricle"="#D9D9D9",
+                "Third Ventricle"="#BC80BD",
+                "C12"="#FFED6F")
+
+p1 <- ggplot(df.expr, aes(lfc1, lfc2)) + 
+  geom_point(aes(color=brain_region), size=2) + geom_smooth(method="lm") + 
+  labs(x=paste0("log2fc(", gene1, ")"), y=paste0("log2fc(", gene2, ")")) + 
+  scale_color_manual(values=mycolorcode) + 
+  theme(text=element_text(family="Arial"), panel.background=element_blank(), 
+        legend.position="none")
+
+# p2 <- ggplot(df.expr, aes(expr1, expr2)) + 
+#   geom_point(size=0.2) + geom_smooth(method="lm") + 
+#   labs(x=paste0("expr(", gene1, ")"), y=paste0("expr(", gene2, ")")) + 
+#   theme(text=element_text(family="Arial"), panel.background=element_blank())
+
+p3 <- ggplot(df.expr, aes(expr1, lfc2)) + 
+  geom_point(aes(color=brain_region), size=2) + geom_smooth(method="lm") + 
+  labs(x=paste0("expr(", gene1, ")"), y=paste0("log2fc(", gene2, ")")) + 
+  scale_color_manual(values=mycolorcode) + 
+  theme(text=element_text(family="Arial"), panel.background=element_blank())
+
+library(patchwork)
+p <- p1 | p3
+
+# ggsave(paste0(outdir, "/", gene1, ".", gene2, ".lfc.png"), p1, width=2.5, height=2.5)
+# ggsave(paste0(outdir, "/", gene1, ".", gene2, ".expr.png"), p2, width=2.5, height=2.5)
+# ggsave(paste0(outdir, "/", gene1, ".", gene2, ".expr_lfc.png"), p3, width=2.5, height=2.5)
+
+ggsave(paste0(outdir, "/", gene1, ".", gene2, ".png"), p, width=4*2, height=3.5)
+```
+
+## 6 整理GFAP和P2RY12 index表格
+
+两个批次，每个批次有3个个体，总共6个表格。需要合并在一起。
+
+```{r}
+outdir <- "001Giotto_out/010immunofluorescence"
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta.csv", row.names=1)
+
+#############################################################################
+
+treatments <- c("FADCtrl", "WTCtrl", "PLX5622")
+
+for (i.gene in c("P2ry12", "Gfap")){
+  measure.list <- list()
+  n <- 1
+  for (treatment in treatments){
+    for (batch in c("1", "2")){
+      sample <- paste0(treatment, "_", batch)
+      cat("doing sample:", sample, ";", "gene:", i.gene, "\n")
+      if (batch == "1"){
+        save.dir <- file.path(outdir, "measurement")
+        if (i.gene == "P2ry12") {
+          channel <- "ch01"
+        } else if (i.gene == "Gfap"){
+          channel <- "ch00"
+        }
+        infile <- file.path(save.dir, 
+                            treatment, 
+                            paste0("Results.", channel, ".reshaped.csv"))
+      } else if (batch == "2") {
+        save.dir <- file.path(outdir, "batch2")
+        if (i.gene == "P2ry12") {
+          channel <- "ch03"
+        } else if (i.gene == "Gfap"){
+          channel <- "ch04"
+        }
+        infile <- file.path(save.dir, 
+                            treatment, 
+                            paste0("Results.", channel, ".reshaped.csv"))
+      }
+      measure <- read.csv(infile, row.names=1)
+      measure$barcode <- paste0(sample, "-", measure$barcode)
+      
+      row.names(measure) <- measure$barcode
+      measure.list[[n]] <- measure
+      n <- n + 1
+    }
+  }
+  measure.df <- do.call(rbind, measure.list)
+  meta[[i.gene]] <- measure.df[meta$cell_ID, "Mean"]
+}
+
+write.csv(meta, "001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv")
+```
+
+
+## 与GFAP相关的细胞类型
+
+1，读取GFAP index表格。
+2，读取per spot cell proportion表格。
+3，相关性分析。
+
+
+```{r}
+
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+
+df.deconvo <- read.csv("001Giotto_out/cell2location/level2/spot.anno.prop.csv", row.names=1)
+meta <- merge(meta, df.deconvo, by.x="cell_ID", by.y="cell.id")
+
+proteins <- c("Gfap", "P2ry12", "Abeta_index")
+cells <- colnames(meta)[18:54]
+
+protein.vec <- c()
+cell.vec <- c()
+p.vec <- c()
+rho.vec <- c()
+n <- 1
+for (protein in proteins) {
+  for (cell in cells) {
+    r <- cor.test(meta[[protein]], meta[[cell]], method="spearman")
+    protein.vec[n] <- protein
+    cell.vec[n] <- cell
+    p.vec[n] <- r$p.value
+    rho.vec[n] <- r$estimate
+    n <- n + 1
+  }
+}
+
+out.df <- data.frame(protein=protein.vec, cell_type=cell.vec, pvalue=p.vec, rho=rho.vec) 
+out.df <- out.df[order(out.df$pvalue), ]
+write.csv(out.df, "001Giotto_out/010immunofluorescence/GFAP_P2RY12_Abeta_index__cor__cell_types.csv")
+
+head(out.df, 10)
+#         protein cell_type        pvalue       rho
+# 29         Gfap Micro_0_1  0.000000e+00 0.3676464
+# 65       P2ry12 Micro_0_0  0.000000e+00 0.3390935
+# 23         Gfap     Glu_5 1.410049e-291 0.2652368
+# 103 Abeta_index Micro_0_1 6.194182e-278 0.2591298
+# 67       P2ry12 Micro_0_2 4.995678e-263 0.2522634
+# 30         Gfap Micro_0_2 2.821899e-250 0.2462165
+# 19         Gfap    Glu_12 7.900699e-249 0.2455197
+# 99  Abeta_index     Glu_7 1.095206e-235 0.2390866
+# 24         Gfap     Glu_6 6.136448e-191 0.2155707
+# 16         Gfap     Glu_1 5.137212e-188 0.2139352
+
+```
+
+
+## 与GFAP相关的基因2
+
+之前是每个样品分别进行相关性分析。其实可以多个样品合在一起做相关性分析。
+
+```{r}
+library(Giotto)
+# 加载gobj
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+# 加载包含GFAP、P2RY12和Abeta index的metadata表格。
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+
+df.deconvo <- read.csv("001Giotto_out/cell2location/level2/spot.anno.prop.csv", row.names=1)
+meta <- merge(meta, df.deconvo, by.x="cell_ID", by.y="cell.id")
+
+# 确定metadata表格和gobj中的metadata表格顺序一致。
+meta.gobj <- meta[match(pDataDT(gobj)$cell_ID, meta$cell_ID), ] # match(a, b)返回的是b中的每一项在a中的秩。
+all(meta.gobj$cell_ID == pDataDT(gobj)$cell_ID) # True
+
+# 对每个基因和GFAP index执行相关性分析。
+
+expr <- get_expression_values(gobj, output="matrix")
+
+# 定向计算 Spearman 相关及 p 值
+library(WGCNA)
+target_data <- as.matrix(meta.gobj[, c(13:15, 18:54)])
+expr.t <- t(as.matrix(expr))
+
+# 根据估算（全部细胞类型 + 三种蛋白） ~ 所有基因，运行时长为1.30148小时。
+start_time <- Sys.time()
+result <- corAndPvalue(target_data, expr.t[, 1:100], method = "spearman")
+end_time <- Sys.time() # 记录终止时间
+end_time - start_time # 计算时间差
+
+# 只计算细胞类型 ~ 所有基因
+result <- corAndPvalue(meta.gobj[, 18:54], expr.t, method = "spearman")
+# 提取结果
+cor_values <- data.frame(result$cor)  # 相关系数向量
+cor_values$cell_type <- row.names(cor_values) # 添加蛋白质名称
+out.df.cor <- melt(cor_values, id.vars="cell_type", variable.name="gene", value.name="rho")
+
+p_values <- data.frame(result$p)      # p 值向量
+p_values$cell_type <- row.names(p_values) # 添加蛋白质名称
+out.df.p <- melt(p_values, id.vars="cell_type", variable.name="gene", value.name="pvalue")
+
+out.df <- merge(out.df.cor, out.df.p, by=c("cell_type", "gene"))
+write.csv(out.df, "001Giotto_out/010immunofluorescence/cell_type__cor__genes.csv")
+out.df <- read.csv("001Giotto_out/010immunofluorescence/cell_type__cor__genes.csv", row.names=1)
+out.df <- out.df[order(out.df$cell_type, out.df$pvalue, out.df$rho, decreasing=c(F, F, T), method = "radix"), ]
+library(dplyr)
+top10_per_category <- out.df %>%
+  group_by(cell_type) %>%
+  slice_head(n = 10)
+write.csv(top10_per_category, "001Giotto_out/010immunofluorescence/cell_type__cor__genes_pos.top10.csv")
+
+out.df <- out.df[order(out.df$cell_type, out.df$pvalue, out.df$rho, decreasing=c(F, F, F), method = "radix"), ]
+top10_per_category <- out.df %>%
+  group_by(cell_type) %>%
+  slice_head(n = 10)
+write.csv(top10_per_category, "001Giotto_out/010immunofluorescence/cell_type__cor__genes_pos.neg.top10.csv")
+
+# 只计算三种蛋白 ~ 所有基因。
+result <- corAndPvalue(meta.gobj[, 13:15], expr.t, method = "spearman")
+
+# 提取结果
+cor_values <- data.frame(result$cor)  # 相关系数向量
+cor_values$protein <- row.names(cor_values) # 添加蛋白质名称
+out.df.cor <- melt(cor_values, id.vars="protein", variable.name="gene", value.name="rho")
+
+p_values <- data.frame(result$p)      # p 值向量
+p_values$protein <- row.names(p_values) # 添加蛋白质名称
+out.df.p <- melt(p_values, id.vars="protein", variable.name="gene", value.name="pvalue")
+
+out.df <- merge(out.df.cor, out.df.p, by=c("protein", "gene"))
+write.csv(out.df, "001Giotto_out/010immunofluorescence/GFAP_P2RY12_Abeta_index__cor__genes.csv")
+
+out.df.gfap <- subset(out.df, protein=="Gfap")
+out.df.gfap <- out.df.gfap[order(out.df.gfap$pvalue), ]
+head(out.df.gfap, 10)
+#       protein      gene        rho        pvalue
+# 20441    Gfap       C4b  0.3336450  0.000000e+00
+# 24036    Gfap      Gfap  0.5013772  0.000000e+00
+# 21875    Gfap      Cst7  0.2307664 2.874969e-219
+# 31775    Gfap     Rims3 -0.2299671 1.004242e-217
+# 20544    Gfap   Camk2n2 -0.2110344 6.837090e-183
+# 32485    Gfap Serpina3n  0.2028666 7.150034e-169
+# 32765    Gfap   Slc17a6 -0.1958484 2.645571e-157
+# 35101    Gfap    Tyrobp  0.1927454 2.496690e-152
+# 29032    Gfap    Nap1l5 -0.1922208 1.697972e-151
+# 34904    Gfap   Tsc22d3 -0.1887851 4.195226e-146
+
+```
+
+# 与P2ry12相关的基因
+
+```{r}
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+# 加载包含GFAP、P2RY12和Abeta index的metadata表格。
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+expr <- get_expression_values(gobj, output="matrix")
+```
+
+
+# 与Slc1a2相关的因素？
+
+```{r}
+
+# 从上面得到的结果提取信息。
+# 1. Slc1a2和星胶的相关性比和神经元的相关性高？
+# 2. Slc1a2和Astro_1的相关性比和其他星胶亚型的相关性高？
+# 3. Slc1a2和小胶质细胞的相关系数在三个组别组的差异？
+# 4. PLX组DAM附近的谷氨酸转运比AD组的表达更高。使用柱形图或者箱线图展示？
+#   按脑区展示。
+#   根据Aβ或者DAM的系数对spot进行分组。
+
+
+out.df <- read.csv("001Giotto_out/010immunofluorescence/cell_type__cor__genes.csv", row.names=1)
+out.df.sub <- subset(out.df, gene %in% c("Slc1a2", "Slc1a3"))
+out.df.sub.pos <- out.df.sub[order(out.df.sub$gene, out.df.sub$pvalue, 
+                       out.df.sub$rho, decreasing=c(F, F, T), method = "radix"), ]
+
+# 结果：
+# 1. Slc1a2和Glu_0的相关系数最大（0.54566332）。Slc1a3和GABA_3相关系数最大（0.32417331）
+# 2. Slc1a2和Astro_1的相关系数比Astro_2大一点分别是0.44936438和0.41834939。与Astro_0负相关。Slc1a3和几种Astro亚型的关系和Slc1a2相似。
+
+# 3. Slc1a2在AD组相比WT组表达下降？
+
+# 绘制相关性点图。
+library(Giotto)
+# 加载gobj
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+# 加载包含GFAP、P2RY12和Abeta index的metadata表格。
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+
+df.deconvo <- read.csv("001Giotto_out/cell2location/level2/spot.anno.prop.csv", row.names=1)
+meta <- merge(meta, df.deconvo, by.x="cell_ID", by.y="cell.id")
+
+# 确定metadata表格和gobj中的metadata表格顺序一致。
+meta.gobj <- meta[match(pDataDT(gobj)$cell_ID, meta$cell_ID), ] # match(a, b)返回的是b中的每一项在a中的秩。
+all(meta.gobj$cell_ID == pDataDT(gobj)$cell_ID) # True
+
+# 对每个基因和GFAP index执行相关性分析。
+
+expr <- get_expression_values(gobj, output="matrix")
+
+# 定向计算 Spearman 相关及 p 值
+library(WGCNA)
+target_data <- as.matrix(meta.gobj[, c(13:15, 18:54)])
+expr.t <- t(as.matrix(expr))
+
+# 三个处理分别计算。Slc1a2 ~ DAM
+meta.gobj$Slc1a2 <- expr.t[, "Slc1a2"]
+meta.gobj$Slc1a3 <- expr.t[, "Slc1a3"]
+
+treatments <- c()
+pvalue <- c()
+rho <- c()
+cellt <- c()
+gene2 <- c()
+n <- 1
+
+for (ct in c("Micro_0_0", "Micro_0_1")) {
+  for (g2 in c("Slc1a2", "Slc1a3")) {
+    for (treat in unique(meta.gobj$treatment)) {
+      meta.sub <- subset(meta.gobj, treatment==treat)
+      cor.out <- cor.test(meta.sub[[ct]], meta.sub[[g2]], method="spearman")
+      treatments[n] <- treat
+      pvalue[n] <- cor.out$p.value
+      rho[n] <- cor.out$estimate
+      cellt[n] <- ct
+      gene2[n] <- g2
+      n <- n + 1
+    }
+  }
+}
+
+df <- data.frame(treatment=treatments, pvalue=pvalue, rho=rho, celltype=cellt, gene2=gene2)
+
+df
+
+
+# 稳态型小胶和Slc1a2正相关。药物处理组的相关系数比AD组小了一些。
+# DAM和Slc1a2负相关。AD组、PL组比WT组负得更多。
+
+# 根据这个结果，只能说DAM附近的谷氨酸转运会下降，但不能说PLX组的谷氨酸转运有恢复。
+# 但这也不能证明PLX组的谷氨酸转运没有恢复。因为DAM的绝对比例确实下降了，谷氨酸转运会恢复，这也能说得通。
+# 可能还是要用ST DEGs的柱形图来说明。
+
+```
+
+# 按照Aβ index进行为H/L
+
+1，沿用了PIGs鉴定过程中的阈值。
+2，读取gobj
+3，获取C1qa表达量。
+4，根据Aβ阈值对spots进行分类。
+5，比较Aβ高和Aβ低区域的C1qa耗竭率，注意data slots是经过了log scale的。
+
+```{r}
+
+gobj <- readRDS("001ST/001Giotto_out/testcombo.rds")
+
+meta <- read.csv("001ST/001Giotto_out/010immunofluorescence/merged/meta.Abeta.csv", row.names=1)
+all(meta$cell_ID == pDataDT(gobj)$cell_ID)
+# [1] TRUE
+
+Abeta_index_cutoff <- 10
+meta$Abeta_pos <- ifelse(meta$Abeta_index > Abeta_index_cutoff, 
+                          yes = "pos", no="neg")
+
+# 获取C1qa表达量
+expr <- get_expression_values(gobj, values="normalized", output="matrix")
+meta$C1qa <- as.vector(expr["C1qa", ])
+
+# 比较Aβ高和Aβ低区域的C1qa耗竭率
+AD.pos <- subset(meta, Abeta_pos=="pos" & treatment == "FADCtrl")
+PL.pos <- subset(meta, Abeta_pos=="pos" & treatment == "PLX5622")
+
+```
+
+# IF、ST、SN的一致性
+
+## GFAP.IF ~ Astro_2.DE(细分脑区)。
+
+为了去除处理效应、批次效应，需要让样本点可以相互匹配。如果取当前共有的11个脑区，感觉太少。不如取细分聚类结果。
+
+```{r}
+# 加载IF结果
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+
+# 加载ST表达矩阵
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+expr.st <- get_expression_values(gobj, output="matrix")
+meta$P2ry12.st <- as.vector(expr.st["P2ry12", ])
+meta$P2ry12.st <- as.vector(expr.st["P2ry12", ])
+meta$Gfap.st <- as.vector(expr.st["Gfap", ])
+meta$Thy1.st <- as.vector(expr.st["Thy1", ])
+
+# 加载去卷积结果
+df.deconvo <- read.csv("001Giotto_out/cell2location/level2/spot.anno.prop.csv", row.names=1)
+
+# 加载ST细分聚类结果（只保留共有cluster）
+meta.subclustered <- read.csv("001Giotto_out/001preprocess/gobj.meta.subclustered.csv", row.names=1)
+library(reshape2)
+df <- aggregate(cell_ID~treatment+cell_types.sub, FUN=length, data=meta.subclustered)
+df2 <- dcast(cell_types.sub~treatment, data=df)
+df2[is.na(df2)] <- 0
+df3 <- df2[apply(df2[, -1], 1, min) > 10, ] # 保留每个处理都有10个spot以上的subcluster。
+gobj.meta.sub <- subset(meta.subclustered, cell_types.sub %in% df3$cell_types.sub)
+
+# 合并IF结果和去卷积结果
+meta2 <- merge(gobj.meta.sub[, c("cell_ID", "treatment", "batch", "cell_types", "cell_types.sub")], 
+      meta[, c("cell_ID", "Abeta_index", "P2ry12", "Gfap", "Thy1.st", "P2ry12.st", "Gfap.st")], 
+      by = "cell_ID")
+
+meta3 <- merge(meta2, df.deconvo[, -(2:3)], by.x="cell_ID", by.y="cell.id")
+
+meta3 <- meta3[, -c(1,4)]
+
+# 根据细分脑区进行汇总
+meta.agg <- aggregate(.~treatment+batch+cell_types.sub, FUN=mean, data=meta3)
+write.csv(meta.agg, "001Giotto_out/010immunofluorescence/merged/modal_consistency.csv", row.names=F)
+
+
+# 不考虑批次、处理，进行相关性分析。
+cor.test(meta.agg$Gfap, meta.agg$Astro_0, method="spearman")
+cor.test(meta.agg$Gfap, meta.agg$Astro_1, method="spearman")
+cor.test(meta.agg$Gfap, meta.agg$Astro_2, method="spearman")
+
+# 尝试矫正批次效应、处理效应之后进行相关性分析
+library(limma)
+meta.agg.corrected <- removeBatchEffect(t(meta.agg[, -(1:3)]), batch=meta.agg$treatment, batch2=meta.agg$batch)
+meta.agg.corrected <- data.frame(t(meta.agg.corrected))
+cor.test(meta.agg.corrected$Gfap, meta.agg.corrected$Astro_0, method="spearman")
+cor.test(meta.agg.corrected$Gfap, meta.agg.corrected$Astro_1, method="spearman")
+cor.test(meta.agg.corrected$Gfap, meta.agg.corrected$Astro_2, method="spearman")
+
+# 尝试只取特定样品
+for(treat in c("WTCtrl", "FADCtrl", "PLX5622")) {
+  meta.agg.sub <- subset(meta.agg, treatment == treat)
+  for (ct in c("Astro_0", "Astro_1", "Astro_2", "Micro_0_0", "Micro_0_1", "Micro_0_2")) {
+    result <- cor.test(meta.agg.sub$Gfap, meta.agg.sub[[ct]], method="spearman")
+    pvalue <- result$p.value
+    rho <- result$estimate
+    cat("Treatment:", treat, "; Cell type:", ct, "; p-value:", pvalue, "; rho:", rho, "\n")
+  }
+}
+
+# Treatment: WTCtrl ; Cell type: Astro_0 ; p-value: 0.2108353 ; rho: -0.1412799
+# Treatment: WTCtrl ; Cell type: Astro_1 ; p-value: 0.197709 ; rho: 0.1454055
+# Treatment: WTCtrl ; Cell type: Astro_2 ; p-value: 2.37744e-06 ; rho: 0.5059541
+
+# Treatment: FADCtrl ; Cell type: Astro_0 ; p-value: 0.02507886 ; rho: -0.2447504
+# Treatment: FADCtrl ; Cell type: Astro_1 ; p-value: 6.65257e-05 ; rho: 0.4246634
+# Treatment: FADCtrl ; Cell type: Astro_2 ; p-value: 3.529308e-06 ; rho: 0.4871722
+
+# Treatment: PLX5622 ; Cell type: Astro_0 ; p-value: 0.1491301 ; rho: -0.1586919
+# Treatment: PLX5622 ; Cell type: Astro_1 ; p-value: 0.4529111 ; rho: 0.08285917
+# Treatment: PLX5622 ; Cell type: Astro_2 ; p-value: 0.21924 ; rho: 0.1353245
+
+```
+
+## 使用柱形图来展示
+
+```{r}
+# 1，使用细分脑区，只保留共有的脑区。
+# 直接使用上面的meta.agg。
+setwd("/home/mouse_ad/001ST")
+meta.agg <- read.csv("001Giotto_out/010immunofluorescence/merged/modal_consistency.csv")
+
+# 2，把前面的合并数据的代码的步骤用中文描述出来。
+
+# 3，把AD组的细分脑区Abeta_index减去WT组的，得到矫正后的各脑区的Aβ index。
+WT <- subset(meta.agg, treatment == "WTCtrl", select=c("batch", "cell_types.sub", "Abeta_index"))
+AD <- subset(meta.agg, treatment == "FADCtrl", select=c("batch", "cell_types.sub", "Abeta_index"))
+meta.agg.diff <- merge(WT, AD, by=c("cell_types.sub", "batch"), suffixes=c("_WT", "_AD"))
+meta.agg.diff$Abeta_index.corrected <- meta.agg.diff$Abeta_index_AD - meta.agg.diff$Abeta_index_WT
+meta.agg.diff2 <- aggregate(Abeta_index.corrected~cell_types.sub, FUN=mean, data=meta.agg.diff)
+meta.agg.diff2 <- meta.agg.diff2[order(meta.agg.diff2$Abeta_index.corrected), ]
+
+# 4，对该脑区按照校正后的Aβ index进行排序，得到High Aβ brain region（H）和Low Aβ brain region（L）。
+# 其中Isortex、hippo既有高Aβindex，也有低Aβ index，是不错的研究材料。
+# 设置H和L的定义标准，可能要考虑脑区占比。现在先随便定一个看起来比较客观的：前50%
+meta.agg.diff2 <- meta.agg.diff2[order(meta.agg.diff2$Abeta_index.corrected), ]
+nrow(meta.agg.diff2)
+meta.agg.diff2$Abeta_group <- ifelse(1:nrow(meta.agg.diff2) <= nrow(meta.agg.diff2)/2, "L", "H")
+
+# 5，根据H和L对各个指标进行汇总，并绘制柱形图。
+H.region <- meta.agg.diff2$cell_types.sub[meta.agg.diff2$Abeta_group == "H"]
+meta.agg$Abeta_group <- ifelse(meta.agg$cell_types.sub %in% H.region, "H", "L")
+
+write.csv(meta.agg, "001Giotto_out/010immunofluorescence/merged/modal_consistency.group_by_Abeta.csv")
+meta.agg <- read.csv("001Giotto_out/010immunofluorescence/merged/modal_consistency.group_by_Abeta.csv", row.names=1)
+
+# Astrocytes
+library(dplyr)
+# meta.agg.summary <- meta.agg %>%
+#   group_by(treatment, Abeta_group) %>%
+#   summarise(across(c(Gfap, Astro_0, Astro_1, Astro_2), mean))
+
+# Microglia
+library(ggplot2)
+library(patchwork)
+dir.create("001Giotto_out/010immunofluorescence/ST_SN_IF_consistency")
+
+meta.agg.summary <- meta.agg %>%
+  group_by(treatment, Abeta_group) %>%
+  summarise(across(c(P2ry12, P2ry12.st, Micro_0_0, Micro_0_1, Micro_0_2), mean))
+
+# version 1
+p.list <- list()
+
+for (i in c("P2ry12", "P2ry12.st", "Micro_0_0", "Micro_0_1", "Micro_0_2")) {
+  data <- meta.agg.summary[, c("treatment", "Abeta_group", i)]
+  colnames(data) <- c("treatment", "Abeta_group", "expr")
+  p <- ggplot(data, aes(x=Abeta_group, y=expr)) + 
+    geom_bar(stat="identity") + 
+    labs(x="Aβ group", y=paste0(i, " expression")) + 
+    facet_grid(.~ treatment) +
+    theme(text=element_text(family="Arial"), panel.background=element_blank(), 
+          legend.position="top")
+  p.list[[i]] <- p
+}
+
+pall <- wrap_plots(p.list, ncol=1)
+
+ggsave("001Giotto_out/010immunofluorescence/ST_SN_IF_consistency/P2RY12_Micro.png", pall, width=6, height=8)
+
+# version 2
+colnames(meta.agg.summary) <- c("treatment", "Abeta_group", "P2RY12", "P2ry12", "HOM", "DAM", "Micro_0_2")
+
+p.list <- list()
+
+for (i in c("P2RY12", "P2ry12", "HOM", "DAM", "Micro_0_2")) {
+  data <- meta.agg.summary[, c("treatment", "Abeta_group", i)]
+  data$treatment <- factor(data$treatment, levels=c("WTCtrl", "FADCtrl", "PLX5622"), ordered=T)
+  colnames(data) <- c("treatment", "Abeta_group", "expr")
+  p <- ggplot(data, aes(x=Abeta_group, y=expr, fill=treatment)) + 
+    geom_bar(stat="identity") + 
+    scale_fill_manual(values=c("WTCtrl"="#FBDCBF", "FADCtrl"="#F39B9A", "PLX5622"="#BBBBDE"))
+  
+  if (i %in% c("P2RY12", "P2ry12")){
+    p <- p + labs(y=paste0(i, " Expression"))
+  } else {
+    p <- p + labs(y=paste0(i, " Proportion"))
+  }
+  
+  p <- p + facet_grid(.~ treatment) +
+    theme(text=element_text(family="Arial"), 
+          panel.background=element_blank(), 
+          legend.position="none", 
+          strip.text=element_blank(), 
+          axis.title.x = element_blank())
+  p.list[[i]] <- p
+}
+
+pall <- wrap_plots(p.list, ncol=5)
+
+ggsave("001Giotto_out/010immunofluorescence/ST_SN_IF_consistency/P2RY12_Micro.v2.png", pall, width=10, height=3)
+# /storage/lch/project/2022-10-14_mouse_spatial/001ST/001Giotto_out/010immunofluorescence/ST_SN_IF_consistency
+
+# 计算差异显著性。
+# 处理内部，H和L之间的差异。
+meta.agg.summary2 <- meta.agg %>%
+  group_by(treatment, batch, Abeta_group) %>%
+  summarise(across(c(P2ry12, P2ry12.st, Micro_0_0, Micro_0_1, Micro_0_2), mean))
+
+for (Treat in c("FADCtrl", "WTCtrl", "PLX5622")){
+  df <- subset(meta.agg.summary2, treatment == Treat)
+  for (Feat in c("P2ry12", "P2ry12.st", "Micro_0_0", "Micro_0_1", "Micro_0_2")) {
+    Y.corrected <- removeBatchEffect(t(df[[Feat]]), batch=df$batch)
+    H <- Y.corrected[df$Abeta_group == "H"]
+    L <- Y.corrected[df$Abeta_group == "L"]
+    O <- t.test(H, L) # p=0.085
+    cat("Treatment:", Treat, "; Feature:", Feat, "; p-value:", O$p.value, "\n")
+  }
+}
+
+# 结果描述：
+# 1，虽然H和L之间的差异并不是都有，但至少在某些条件下可以检测出来。
+# 2，不同处理之间的差异比较明显。
+# 3，不同细胞亚型之间的差异也能看出来。
+# 4，和预期有点出入。空转中P2ry12在H和L之间居然没有差异，和IF以及DE不一样。但可以进行解释。IF代表的是过去的转录表达产物，ST代表
+#   的是当前的转录表达状态（单个基因）。DE代表的是细胞比例（综合多个基因进行推测）。
+# 是不是要考虑把单核、细胞比例也考虑进去？
+# 处理之间的差异？
+```
+
+## GFAP.IF ~ Astro_2.DE(所有spots)。
+
+```{r}
+# 加载IF结果
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+
+# 加载去卷积结果
+df.deconvo <- read.csv("001Giotto_out/cell2location/level2/spot.anno.prop.csv", row.names=1)
+df.deconvo2 <- data.frame(df.deconvo[, 4:ncol(df.deconvo)], row.names=df.deconvo$cell.id)
+df.deconvo2 <- df.deconvo2[meta$cell_ID, ]
+meta.if.de <- cbind(meta, df.deconvo2)
+
+cor.test(meta.if.de$Gfap, meta.if.de$Astro_2, method="spearman")
+# data:  meta.if.de$Gfap and meta.if.de$Astro_2
+# S = 8.2324e+11, p-value < 2.2e-16
+# alternative hypothesis: true rho is not equal to 0
+# sample estimates:
+#       rho
+# 0.1885793
+
+cor.test(meta.if.de$P2ry12, meta.if.de$Micro_0_0, method="spearman")
+# data:  meta.if.de$P2ry12 and meta.if.de$Micro_0_0
+# S = 6.7053e+11, p-value < 2.2e-16
+# alternative hypothesis: true rho is not equal to 0
+# sample estimates:
+#       rho
+# 0.3390935
+
+```
+
+
+## Trem2表达在Aβ-H脑区比Aβ-L脑区高
+
+```{r}
+# 需要的数据：四列，1）Aβ-H/Aβ-L。2）分组信息。3）Trem2表达。4）P2ry12表达。
+
+# 1，加载Aβ分组结果
+meta.agg <- read.csv("001Giotto_out/010immunofluorescence/merged/modal_consistency.group_by_Abeta.csv", row.names=1)
+
+# 2，加载ST细分聚类结果（只保留共有cluster）
+meta.subclustered <- read.csv("001Giotto_out/001preprocess/gobj.meta.subclustered.csv", row.names=1)
+
+# 合并1和2，根据细分脑区ID
+br2group <- meta.agg$Abeta_group
+names(br2group) <- meta.agg$cell_types.sub
+meta.subclustered.sub <- subset(meta.subclustered, cell_types.sub %in% meta.agg$cell_types.sub)
+meta.subclustered.sub$Abeta_group <- br2group[meta.subclustered.sub$cell_types.sub]
+
+# 加载ST表达矩阵，用于提取Trem2表达量。
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+meta.st <- pDataDT(gobj)
+expr.st <- get_expression_values(gobj, output="matrix", values="normalized")
+meta.st$Trem2 <- as.vector(expr.st["Trem2", ])
+meta.st$Tmem119 <- as.vector(expr.st["Tmem119", ])
+
+# 3，合并1和2和3
+meta.st.sub <- merge(meta.subclustered.sub[, c("cell_ID", "Abeta_group")], 
+                        meta.st[, c("cell_ID", "treatment", "batch", "Trem2", "Tmem119")], 
+                        by = "cell_ID")
+
+write.csv(meta.st.sub, "001Giotto_out/010immunofluorescence/merged/compare_Trem2_in_Abeta-H_and_Abeta-L.csv", row.names=F)
+
+meta.st.sub <- read.csv("001Giotto_out/010immunofluorescence/merged/compare_Trem2_in_Abeta-H_and_Abeta-L.csv")
+
+# 绘图
+meta.st.sub2 <- subset(meta.st.sub, treatment=="FADCtrl")
+
+# v1: 默认boxplot
+p <- ggplot(meta.st.sub2, aes(x=Abeta_group, y=Trem2, fill=treatment)) + 
+  geom_boxplot() + 
+  labs(x="Aβ group", y="Trem2 Expression") + 
+  scale_fill_manual(values=c("FADCtrl"="#F39B9A")) +
+  theme(text=element_text(family="Arial"), panel.background=element_blank(), legend.position="top")
+
+ggsave("001Giotto_out/010immunofluorescence/merged/Trem2_in_Abeta-H_and_Abeta-L.png", p, width=4, height=4)
+# /storage/lch/project/2022-10-14_mouse_spatial/001ST/001Giotto_out/010immunofluorescence/merged/
+
+# 统计检验。
+Trem2.H <- meta.st.sub2$Trem2[meta.st.sub2$Abeta_group == "H"]
+Trem2.L <- meta.st.sub2$Trem2[meta.st.sub2$Abeta_group == "L"]
+t.test(Trem2.H, Trem2.L)
+
+# 使用ggpubr包绘制箱线图
+library(ggpubr)
+# v2: 使用ggpubr包绘制箱线图
+p1 <- ggboxplot(meta.st.sub2, x="Abeta_group", y="Trem2", fill="treatment", 
+               palette=c("FADCtrl"="#F39B9A"), 
+               xlab="Aβ group", ylab="Trem2 Expression") +
+  stat_compare_means(comparisons = list(c("H", "L")), label = "p.signif", method = "t.test") +
+  theme(text=element_text(family="Arial"), panel.background=element_blank(), legend.position="none")
+
+p2 <- ggboxplot(meta.st.sub2, x="Abeta_group", y="Tmem119", fill="treatment", 
+               palette=c("FADCtrl"="#F39B9A"), 
+               xlab="Aβ group", ylab="Tmem119 Expression") +
+  stat_compare_means(comparisons = list(c("H", "L")), label = "p.signif", method = "t.test") +
+  theme(text=element_text(family="Arial"), panel.background=element_blank(), legend.position="none")
+
+pall <- p1 + p2 + plot_layout(ncol=2)
+ggsave("001Giotto_out/010immunofluorescence/merged/Trem2_in_Abeta-H_and_Abeta-L.v2.png", pall, width=4, height=4)
+```
+

@@ -1,0 +1,185 @@
+
+## data preprocessing
+
+### sn data
+
+```{r}
+# env: dhlab-17
+# dir: /home/mouse_ad/002SC
+# sn data
+
+library(SeuratDisk)
+library(SingleCellExperiment)
+
+sobj2 <- CreateSeuratObject(counts=sobj@assays$RNA@counts, 
+                            meta.data=sobj@meta.data)
+
+fp <- "./004Seurat_out/002cell_type_anno/sobj_for_deconvolution.h5Seurat"
+
+SaveH5Seurat(sobj2, filename = fp)
+# Creating h5Seurat file for version 3.1.5.9900
+# Adding counts for RNA
+# Adding data for RNA
+# No variable features found for RNA
+# No feature-level metadata found for RNA
+
+
+Convert(fp, dest = "h5ad") 
+
+# 运行成功：
+# Validating h5Seurat file
+# Adding data from RNA as X
+# Adding counts from RNA as raw
+# Transfering meta.data to obs
+
+ls -ahl
+# -rw-r--r--. 1 lch lch 1.9G Dec 20 22:21 sobj_for_deconvolution.h5ad
+
+```
+
+#### using pseudobulk
+
+When performing deconvolution analysis on combined single-cell and spatial transcriptome data, is using a pseudobulk for the single-cell data better than using the original single-cell matrix?
+
+This is a crucial and fundamental question in integrating single-cell and spatial transcriptome analysis. The answer is: for most spatial deconvolution tasks, using a pseudobulk is generally superior to using the original single-cell matrix directly, and is the recommended approach for current mainstream tools.
+
+```{r}
+
+setwd("/home/mouse_ad/002SC")
+
+library(SeuratDisk)
+library(Seurat)
+
+# anno.L1
+for (LEVEL in c("anno.L1", "anno.L2", "anno.L3")) {
+  if (F) {
+    LEVEL <- "anno.L3"
+  }
+  summed <- readRDS(paste0("004Seurat_out/004DEGs/DESeq/", LEVEL, "/summed.", LEVEL, ".rds"))
+  meta2 <- data.frame(summed@colData[, c("orig.ident", LEVEL, "batch", "treatment")])
+  row.names(meta2) <- paste0(meta2$orig.ident, "_", meta2[[LEVEL]])
+  matrix2 <- assays(summed)$counts
+  colnames(matrix2) <- row.names(meta2)
+  sobj2 <- CreateSeuratObject(matrix2, meta.data=meta2)
+  
+  fp <- paste0("004Seurat_out/004DEGs/DESeq/", LEVEL, "/summed.", LEVEL, ".h5Seurat")
+  SaveH5Seurat(sobj2, filename = fp)
+  Convert(fp, dest = "h5ad") 
+}
+```
+
+
+### st data
+
+It seems that all you need to do is copy the h5ad file from the original data.
+
+## run
+
+```{bash}
+
+# env: HPCC, conda (cell2loc_env)
+# dir: /icto/user/yc27658/data-home/project/2022-10-14_mouse_spatial/cell2location # L1
+# dir: /icto/user/yc27658/data-home/project/2022-10-14_mouse_spatial/cell2location.L2 # L2
+# dir: /icto/user/yc27658/data-home/project/2022-10-14_mouse_spatial/cell2location.L3 # L3
+
+srun -p gpu-short --gres=gpu:1 --mem=40G --time=01:00:00 --pty /bin/bash
+
+conda activate cell2loc_env
+
+python train_model.1.py
+
+python view_step1.py
+
+python train_model2.1.py
+
+```
+
+Using only one GPU, it takes approximately 45 minutes to run one sample. On HPCC, submit a single batch script, running only one sample at a time. This fully utilizes the GPU-short nodes, ensuring each sample completes its run while allowing the next script to run immediately after the previous one finishes.
+
+Note that memory should be set to 40GB; setting it to 20GB will result in an insufficient memory warning.
+
+Actually, you can schedule 3 tasks within 3 hours. HPCC limits a maximum of 5 tasks to running simultaneously, with 5 tasks queued.
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name              cell2location
+#SBATCH --partition             gpu-short
+#SBATCH --nodes                 1
+#SBATCH --tasks-per-node        1
+#SBATCH --time                  3:00:00
+#SBATCH --mem                   40G
+#SBATCH --gres                  gpu:1
+#SBATCH --output                ./log/cell2location.%j.out
+#SBATCH --error                 ./log/cell2location.%j.err
+#SBATCH --mail-type             ALL
+#SBATCH --mail-user             yc27658@um.edu.com
+
+source /etc/profile
+source /etc/profile.d/modules.sh
+
+#Adding modules
+module add cuda/9.2.148
+module add amber/18/gcc/4.8.5/cuda/9
+
+ulimit -s unlimited
+
+#Your program starts here
+echo $CUDA_VISIBLE_DEVICES
+python script/train_model2.1.py
+```
+
+```{bash}
+sbatch script/submit-coral-gpu.sh.1
+sbatch script/submit-coral-gpu.sh.2
+sbatch script/submit-coral-gpu.sh.3
+sbatch script/submit-coral-gpu.sh.4
+sbatch script/submit-coral-gpu.sh.5
+sbatch script/submit-coral-gpu.sh.6
+```
+
+## Results Summary
+
+```{r}
+# env: dhlab-17 docker
+
+setwd("/home/mouse_ad/001ST")
+
+library(Giotto)
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+
+for (LEVEL in c("anno.L1", "anno.L2", "anno.L3")) {
+  # LEVEL <- "anno.L1"
+  
+  cell.meta <- pDataDT(gobj)
+  cell.meta.sub <- data.frame(cell.meta[, c("cell_ID", "cell_types", "list_ID")])
+  colnames(cell.meta.sub) <- c("cell.id", "brain.region", "sample")
+  
+  # Combine data from several samples.
+  samples <- unique(cell.meta$list_ID)
+  names(samples) <- samples
+  
+  spot.anno.list <- list()
+  for (sample in samples) {
+    sample2 <- sub("_", ".", sample, fixed = T)
+    in.file <- paste0("001Giotto_out/cell2location2/result_", 
+                     LEVEL, "/cell2location_map_", 
+                     sample2, "/", sample2, ".cell2loc.csv")
+    data <- read.csv(in.file, row.names=1)
+    cell.id <- paste0(sample, "-", row.names(data))
+    data <- cbind(cell.id=cell.id, data[, 7:ncol(data)])
+    spot.anno.list[[sample]] <- data
+  }
+  
+  spot.anno.df <- data.frame(do.call(rbind, spot.anno.list))
+  row.names(spot.anno.df) <- NULL
+  spot.anno.df <- merge(spot.anno.df, cell.meta.sub, by="cell.id")
+  
+  end.col <- ncol(spot.anno.df) - 2
+  total_abundance <- rowSums(spot.anno.df[, 2:end.col])
+  spot.anno.prop <- cbind(spot.anno.df[, c("cell.id", "sample", "brain.region")], 
+                              spot.anno.df[, 2:end.col]/total_abundance)
+  
+  write.csv(spot.anno.prop, paste0("001Giotto_out/cell2location2/", LEVEL, ".spot.anno.prop.csv"))
+}
+
+```

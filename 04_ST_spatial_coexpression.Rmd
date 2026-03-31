@@ -1,0 +1,1692 @@
+
+## Load Environment
+
+```{r}
+# thinkpad dir: subprojects/2025-01-16_PLX5622_spatial_coexpression_analysis2
+# dhlab dir: 001ST/001Giotto_out/007spatial_coexpr/hdWGCNA/
+```
+
+```{r}
+# Reference: https://smorabit.github.io/hdWGCNA/articles/ST_basics.html
+
+# single-cell analysis package
+library(Seurat)
+
+# plotting and data science packages
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+
+# co-expression network analysis packages:
+library(WGCNA)
+library(hdWGCNA)
+
+# enable parallel processing for network analysis (optional)
+# enableWGCNAThreads(nThreads = 1)
+# disableWGCNAThreads()
+
+# using the cowplot theme for ggplot
+theme_set(theme_cowplot())
+
+# set random seed for reproducibility
+set.seed(12345)
+
+Giotto2Seurat <- function(obj){
+  expr <- get_expression_values(testcombo)@exprMat
+  meta <- as.data.frame(pDataDT(testcombo))
+  row.names(meta) <- meta$cell_ID
+  obj.seurat <- CreateSeuratObject(counts=expr, meta.data=meta)
+  obj.seurat <- NormalizeData(obj.seurat)
+  return(obj.seurat)
+}
+```
+
+## Construct Network
+
+`MetaspotsByGroups(group.by = c("cell_type", "Sample"), ident.group = 'cell_type')` represents grouping cells/spots based on cell_type and Sample to build metacells, and after building, sets cell_type as the default identity.
+
+`SetDatExpr(group_name="INH", group.by="cell_type")` represents performing co-expression network analysis only for the INH cell subtype.
+
+### Construct Metaspots
+
+```{r}
+library(Giotto)
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/")
+
+testcombo <- readRDS("001Giotto_out/testcombo.rds")
+write.csv(testcombo@spatial_locs$cell$raw@coordinates, "001Giotto_out/007spatial_coexpr/hdWGCNA/spatial_coordinates.csv")
+
+st.seurat <- Giotto2Seurat(testcombo)
+st.seurat$row <- st.seurat$array_row
+st.seurat$col <- st.seurat$array_col
+Idents(st.seurat) <- "cell_types"
+
+# Select genes used to construct the network.
+st.seurat <- SetupForWGCNA(
+  st.seurat,
+  gene_select = "fraction",
+  fraction = 0.05,
+  wgcna_name = "ST"
+  )
+
+trace(MetaspotsByGroups, edit=T) # Comment out the following code
+#     if (!all(c("row", "col", "imagerow", "imagecol") %in% colnames(seurat_obj@meta.data))) {
+#         stop("Spatial coordinates missing from seurat_obj@meta.data, must have columns named row, col, imagerow, and imagecol.")
+#     }
+
+trace(ConstructMetaspots, edit=T) # Comment out the following
+# image_class <- class(cur_seurat@images[[1]])
+# if (image_class == "VisiumV2") {
+#     if (length(Images(cur_seurat)) > 1) {
+#         stop("More than one sample present in grouping. Please specify a metadata column with group.by indicating different ST samples.")
+#     }
+# }
+# else {
+#     if (sum(unlist(lapply(Images(cur_seurat), function(x) {
+#         nrow(cur_seurat@images[[x]]@coordinates) != 0
+#     }))) != 1) {
+#         stop("More than one sample present in grouping. Please specify a metadata column with group.by indicating different ST samples.")
+#     }
+# }
+
+st.seurat <- MetaspotsByGroups(
+  st.seurat,
+  group.by = c("list_ID", "cell_types"),
+  ident.group = "cell_types",
+  assay = 'RNA'
+)
+
+st.seurat  <- NormalizeMetacells(st.seurat)
+
+table(st.seurat@misc$ST$wgcna_metacell_obj@meta.data$list_ID)
+
+# FADCtrl_1 FADCtrl_2 PLX5622_1 PLX5622_2  WTCtrl_1  WTCtrl_2
+#       652       733       683       705       667       738
+```
+
+### Batch Effect Removal for All Treatments Combined
+
+Perform batch effect removal for all data. Then check the expression of genes such as C1qa before and after batch effect removal to ensure that the effect between treatments is still preserved.
+
+There are three questions:
+1. Should removal be performed after building metacells, or should the original matrix be corrected? If using the original matrix, should the operation be performed on counts or data? If performed on counts, the resulting values will be decimals, and the matrix sparsity may limit the effectiveness of batch correction. If using metacell data, consider whether subsequent hdWGCNA analysis is based on counts or data.
+
+The `MetaspotsByGroups` step is based on counts of the original expression matrix.
+
+The `SetDatExpr` step uses data in the metacell object as input by default.
+
+2. Should normalized data be used to remove batch effects?
+3. Should brain regions be added to the design? Yes.
+
+```{r}
+
+library(limma)
+expr <- st.seurat@misc$ST$wgcna_metacell_obj@assays$RNA@data
+meta <- st.seurat@misc$ST$wgcna_metacell_obj@meta.data
+
+# Experimental design
+meta$batch <- as.factor(meta$batch)
+design=model.matrix(~cell_types+treatment, data = meta)
+
+expr.corrected <- removeBatchEffect(expr, 
+                                   batch=meta$batch, 
+                                   covariates = meta$nCount_RNA, 
+                                   design=design)
+
+sobj.metespot <- st.seurat@misc$ST$wgcna_metacell_obj 
+sobj.metespot@assays$RNA@data <- expr.corrected
+```
+
+### Construct WGCNA Objects for Each Treatment Separately
+
+```{r}
+
+wgcna.obj.list <- list()
+
+for (treatment in c("PLX5622", "FADCtrl", "WTCtrl")) {
+  # treatment <- "PLX5622"
+  sobj.sub <- st.seurat[, st.seurat$treatment == treatment]
+  
+  dim(sobj.sub@misc$ST$wgcna_metacell_obj)
+  # 18551  4178
+  dim(st.seurat@misc$ST$wgcna_metacell_obj)
+  # 18551  4178
+  
+  sobj.sub@misc$ST$wgcna_metacell_obj <- sobj.metespot[, sobj.metespot$treatment == treatment]
+  dim(sobj.sub@misc$ST$wgcna_metacell_obj)
+  # [1] 18551  1388
+  
+  wgcna.obj.list[[treatment]] <- sobj.sub
+}
+```
+
+
+### Construct Spatial Co-expression Network
+
+```{r}
+for (treatment in c("PLX5622", "FADCtrl", "WTCtrl")) {
+  
+  sobj.sub <- wgcna.obj.list[[treatment]]
+  
+  sobj.sub@misc$active_wgcna <- "ST"
+  
+  sobj.sub  <- SetDatExpr(
+    sobj.sub,
+    group.by=NULL,
+    group_name = NULL
+    )
+  
+  sobj.sub <- TestSoftPowers(sobj.sub)
+  
+  sobj.sub <- ConstructNetwork(
+    sobj.sub,
+    tom_name=treatment,
+    overwrite_tom=TRUE, 
+    minModuleSize = 20
+  )
+  
+  sobj.sub <- ModuleEigengenes(sobj.sub) # Module Eigengenes (MEs) 
+  sobj.sub <- ModuleConnectivity(sobj.sub) # eigengene-based connectivity, also known as kME
+  
+  tmp.vec <- c("PLX5622"="PL", "FADCtrl"="AD", "WTCtrl"="WT")
+  
+  sobj.sub <- ResetModuleNames(
+    sobj.sub,
+    new_name = tmp.vec[treatment]
+  )
+  
+  pdf(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/", treatment, ".dendrogram.pdf"))
+  PlotDendrogram(sobj.sub, main='Spatial hdWGCNA dendrogram')
+  dev.off()
+  
+  # df.mod <- sobj.sub@misc$PLX5622$wgcna_modules
+  
+  # table(sobj.sub@misc$PLX5622$wgcna_modules$module)
+  #  grey   PL1   PL2   PL3   PL4   PL5
+  # 18027   177    71    85   120    61
+  
+  wgcna.obj.list[[treatment]] <- sobj.sub
+}
+# treatment <- "PLX5622"
+
+saveRDS(wgcna.obj.list, "001Giotto_out/007spatial_coexpr/hdWGCNA/hdWGCNA.rds")
+# wgcna.obj.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/hdWGCNA.rds")
+
+# Check soft power
+wgcna.obj.list$PLX5622@misc$ST$wgcna_params$power # 8
+# FADCtrl: 7
+# WTCtrl: 7
+
+# Check number of modules
+
+for (i in names(wgcna.obj.list)) {
+  cat(i, "\n")
+  print(table(wgcna.obj.list[[i]]@misc$ST$wgcna_modules$module))
+  cat("\n")
+}
+
+```
+
+## Describe Modules
+
+### Hub Genes and Module Clustering
+
+Reference: https://smorabit.github.io/hdWGCNA/articles/basic_tutorial.html
+
+Module Eigengenes (MEs) are a commonly used metric to summarize the gene expression profile of an entire co-expression module. Briefly, module eigengenes are computed by performing principal component analysis (PCA) on the subset of the gene expression matrix comprising each module. The first PC of each of these PCA matrices are the MEs.
+
+hdWGCNA includes a function ModuleEigengenes to compute module eigengenes in single cells. Additionally, we allow the user to apply Harmony batch correction to the MEs, yielding harmonized module eigengenes (hMEs). The following code performs the module eigengene computation harmonizing by the Sample of origin using the group.by.vars parameter.
+
+SpatialFeaturePlot: No image, so it cannot be drawn.
+
+ModuleFeaturePlot: Coordinates need to be stored in sobj@reductions, but the CreateDimReducseurat_vhd method mentioned in the tutorial was not found.
+```{r}
+
+# i <- "FADCtrl"
+# 
+# modules <- GetModules(seurat_obj)
+# mods <- levels(modules$module); mods <- mods[mods != 'grey']
+
+spatial_coordinates <- read.csv("001Giotto_out/007spatial_coexpr/hdWGCNA/spatial_coordinates.csv", row.names=1)
+row.names(spatial_coordinates) <- spatial_coordinates$cell_ID
+
+# Draw spatialFeaturePlot manually.
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/spatialFeaturePlot/")
+# all(row.names(MEs) == row.names(seurat_obj@meta.data)) # TRUE
+library(patchwork)
+
+for (treatment in names(wgcna.obj.list)) {
+  seurat_obj <- wgcna.obj.list[[treatment]]
+  MEs <- GetMEs(seurat_obj)
+  MEs <- MEs[, colnames(MEs)!="grey"]
+  coord.sub <- spatial_coordinates[row.names(seurat_obj@meta.data), ]
+  # treatment <- "WTCtrl"
+  
+  for (mod in colnames(MEs)) {
+    # mod <- "WT1"
+    df <- cbind(seurat_obj@meta.data[, c("list_ID", "row", "col")], expr=MEs[[mod]], 
+                 x=coord.sub$sdimx, y=coord.sub$sdimy)
+    
+    df1 <- subset(df, seurat_obj$batch == 1)
+    df2 <- subset(df, seurat_obj$batch == 2)
+    
+    p1 <- ggplot(df1, aes(x, y, color=expr)) + geom_point() + 
+      scale_color_gradient2(low="blue", mid="white", high="red", midpoint=median(df1$expr)) + 
+      labs(title=paste0(treatment, "_1")) + 
+      theme(axis.text = element_blank())
+    
+    p2 <- ggplot(df2, aes(x, y, color=expr)) + geom_point() + 
+      scale_color_gradient2(low="blue", mid="white", high="red", midpoint=median(df2$expr)) + 
+      labs(title=paste0(treatment, "_2")) + 
+      theme(axis.text = element_blank())
+    
+    p <- p1 | p2
+    
+    p <- p + plot_annotation(title = mod,
+                  theme = theme(plot.title = element_text(size = 18)))
+    
+    ggsave(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/spatialFeaturePlot/", 
+                  treatment, ".", mod, ".jpg"), p, width=14, height=7)
+  }
+}
+
+
+# How to display only one module?
+# https://smorabit.github.io/hdWGCNA/articles/network_visualizations.html
+# hubgene network
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/HubGeneNetworkPlot/")
+for (treatment in names(wgcna.obj.list)) {
+  seurat_obj <- wgcna.obj.list[[treatment]]
+  mods <- levels(seurat_obj@misc$ST$wgcna_modules$module)
+  for (mod in mods) {
+    pdf(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/HubGeneNetworkPlot/", mod, ".pdf"))
+    HubGeneNetworkPlot(
+      seurat_obj,
+      n_hubs = 5, n_other=50,
+      edge_prop = 0.75,
+      mods = mod
+    )
+    dev.off()
+  }
+}
+
+for (treatment in names(wgcna.obj.list)) {
+  seurat_obj <- wgcna.obj.list[[treatment]]
+# Applying UMAP to co-expression networks
+  seurat_obj <- RunModuleUMAP(
+    seurat_obj,
+    n_hubs = 10, # number of hub genes to include for the UMAP embedding
+    n_neighbors=15, # neighbors parameter for UMAP
+    min_dist=0.1 # min distance between points in UMAP space
+  )
+  wgcna.obj.list[[treatment]] <- seurat_obj
+}
+
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/ModuleUMAPPlot/")
+
+for (treatment in names(wgcna.obj.list)) {
+  seurat_obj <- wgcna.obj.list[[treatment]]
+  pdf(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/ModuleUMAPPlot/",
+             treatment, ".ModuleUMAPPlot.pdf"))
+  # Module names were not displayed, and hub gene labels overlapped.
+  ModuleUMAPPlot(
+    seurat_obj,
+    edge.alpha=0.25,
+    sample_edges=TRUE,
+    edge_prop=0.1, # proportion of edges to sample (20% here)
+    label_hubs=3 ,# how many hub genes to plot per module?
+    keep_grey_edges=FALSE
+  )
+  dev.off()
+}
+
+# get hub genes
+hub_df.list <- list()
+
+for (treatment in names(wgcna.obj.list)) {
+  seurat_obj <- wgcna.obj.list[[treatment]]
+  hub_df <- GetHubGenes(seurat_obj, n_hubs = 10)
+  hub_df$treatment <- treatment
+  hub_df.list[[treatment]] <- hub_df
+}
+
+hub_df <- Reduce(rbind, hub_df.list)
+
+write.csv(hub_df, "001Giotto_out/007spatial_coexpr/hdWGCNA/hub_df.csv")
+
+# Draw spatial expression maps of top 2 hub genes
+# df2 <- aggregate(gene_name~module, FUN=function(x){head(x, 2)}, data=subset(df, treatment=="PLX5622"))
+# dir.create("tmp")
+# for (i in 1:nrow(df2)) {
+#   mod.names <- df2$module[i]
+#   top2 <- df2$gene_name[i, ]
+#   writeLines(top2, paste0("tmp/", mod.names, ".list"))
+# }
+# 
+# for i in {1..15}; do ./plot_gene ./genelist/PL.mod/PL${i}.list ${i}; done
+
+# Draw directly using Giotto's method
+library(Giotto)
+gobj <- readRDS("../001ST/001Giotto_out/testcombo.rds")
+meta <- pDataDT(gobj)
+WTCtrl_2 <- meta$cell_ID[meta$list_ID == "WTCtrl_2"]
+gobj.sub <- subsetGiotto(gobj, cell_ids=WTCtrl_2)
+top1.hub <- c()
+for (i in 1:15) {
+  df.sub <- subset(df, module == paste0("PL", i))
+  top1.hub <- c(top1.hub, df.sub[1, "gene_name"])
+}
+
+# p <- spatFeatPlot2D(gobj.sub, feats=top1.hub, cow_n_col=3, point_size=1.2) # If drawn together, it will be fixed at 3.
+
+trace(spatFeatPlot2D_single, edit=T)
+# Change the final return from combo_plot to savelist. Giotto's default plotting function returns images processed by cowplot, which cannot be directly
+# subjected to ggplot layer operations. So the returned object needs to be changed back to the original ggplot object.
+
+library(patchwork)
+p.list <- list()
+for (i in 1:15) {
+  g <- top1.hub[i]
+  mid.point <- NULL
+  if (g == "Tyrobp") mid.point <- 0.5
+  p <- spatFeatPlot2D_single(gobj.sub, feats=g, point_size=1.4, gradient_midpoint=mid.point, return_plot=T)
+  p <- p[[1]]
+  p <- p + labs(title = paste0("PL", i, ": ", g)) + theme(plot.title = element_text(family="Arial", face="bold"))
+  p.list[[g]] <- p
+}
+p.all <- wrap_plots(p.list, ncol = 3)
+ggsave("../001ST/001Giotto_out/007spatial_coexpr/hdWGCNA/PL.hub.spatPlot.jpg", p.all, width=15, height=20)
+# Effects of outliers have not been resolved yet.
+
+
+# Modules of interest:
+
+interested.modules <- c("WT2", "WT9", "WT14", 
+                        "AD13", "PL11", "PL6", 
+                        "PL9", "PL12", "PL14", 
+                        "WT7", "WT8", "WT12")
+
+subset(hub_df, module %in% interested.modules)
+
+# compute gene scoring for the top 25 hub genes by kME for each module
+# with UCell method
+library(UCell)
+seurat_obj <- ModuleExprScore(
+  seurat_obj,
+  n_genes = 25,
+  method='UCell'
+)
+
+# Similarity between modules
+# Old method: jaccard
+# jaccard <- function(a, b) {
+#     intersection = length(intersect(a, b))
+#     union = length(a) + length(b) - intersection
+#     return (intersection/union)
+# }
+
+mod.df.list <- list()
+for (treatment in names(wgcna.obj.list)) {
+  mod.df <- wgcna.obj.list[[treatment]]@misc$ST$wgcna_modules
+  mod.df$treatment <- treatment
+  mod.df.list[[treatment]] <- mod.df
+}
+
+saveRDS(mod.df.list, "001Giotto_out/007spatial_coexpr/hdWGCNA/wgcna_modules.list.rds")
+# mod.df.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/wgcna_modules.list.rds")
+
+# New method: Construct a PA (Presence/Absence) matrix of genes, then perform cluster analysis. Module IDs are columns, genes are rows; 0 means the gene is absent in the module, 1 means present.
+# Obtain one PA matrix for each treatment using dcast.
+# Combine using merge (all = T), then fill NA values with 0.
+library(reshape2)
+PA.df.list <- list()
+
+for (treatment in names(wgcna.obj.list)) {
+  mod.df1 <- wgcna.obj.list[[treatment]]@misc$ST$wgcna_modules
+  mod.df1 <- subset(mod.df1, module != "grey", select=c("gene_name", "module"))
+  mod.df1$value <- 1
+  mod.df1 <- dcast(formula=gene_name~module, value.var="value", data=mod.df1)
+  mod.df1[is.na(mod.df1)] <- 0
+  PA.df.list[[treatment]] <- mod.df1
+}
+
+PA.df <- Reduce(function(x, y){merge(x, y, all=T, by="gene_name")}, PA.df.list)
+PA.df[is.na(PA.df)] <- 0
+PA.df <- data.frame(PA.df[, -1], row.names=PA.df$gene_name)
+
+library(pheatmap)
+
+pdf("001Giotto_out/007spatial_coexpr/hdWGCNA/gene_PA_in_modules.pdf", width=8, height=6)
+pheatmap(PA.df, show_rownames = F)
+dev.off()
+
+```
+
+### Modules containing genes of interest
+
+```{r}
+# Which modules contain the genes of interest?
+interested.genes <- list(HOM = c("Tmem119", "P2ry12", "Csf1r"), 
+                         DAM = c("Trem2", "Tyrobp"), 
+                         Atp = c("mt-Atp8", "mt-Nd3"), 
+                         Gaba = c("Gabra1", "Gabrg3"), 
+                         glu = c("Gria1", "Gria2"), 
+                         Astro = c("Gfap", "C4b"))
+
+tmp <- unlist(interested.genes)
+interested.genes <- data.frame(genetype=names(tmp), gene=tmp)
+
+mod.list <- list()
+for (i in names(wgcna.obj.list)) {
+  wobj <- wgcna.obj.list[[i]]
+  mod <- wobj@misc$ST$wgcna_modules
+  mod.list[[i]] <- cbind(mod[, 1:3], treatment=i)
+}
+
+mod.df <- Reduce(rbind, mod.list)
+
+mod.df <- merge(interested.genes, mod.df, by.x="gene", by.y="gene_name")
+mod.df$genetype <- sub("\\d+$", "", mod.df$genetype, perl=T)
+mod.df <- mod.df[order(mod.df$genetype), ]
+mod.df
+```
+
+### Network Functional Enrichment Analysis
+
+Reference: https://smorabit.github.io/hdWGCNA/articles/enrichment_analysis.html
+
+```{r}
+
+# gene enrichment packages
+library(enrichR)
+library(GeneOverlap)
+
+dbs <- c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021')
+
+enrich_df.list <- list()
+
+for (treatment in names(wgcna.obj.list)) {
+  seurat_obj <- wgcna.obj.list[[treatment]]
+  
+  # perform enrichment tests
+  seurat_obj <- RunEnrichr(
+    seurat_obj,
+    dbs=dbs, # character vector of enrichr databases to test
+    max_genes = 100 # number of genes per module to test. use max_genes = Inf to choose all genes!
+  )
+  
+  # retrieve the output table
+  enrich_df <- GetEnrichrTable(seurat_obj) # seurat_obj@misc[[wgcna_name]]$enrichr_table
+  
+  enrich_df.list[[treatment]] <- enrich_df
+  
+  # make GO term plots:
+  # EnrichrBarPlot(
+  #   seurat_obj,
+  #   outdir = "001Giotto_out/007spatial_coexpr/hdWGCNA/enrichr_plots/", # name of output directory
+  #   n_terms = 10, # number of enriched terms to show (sometimes more show if there are ties!!!)
+  #   plot_size = c(5,7), # width, height of the output .pdfs
+  #   logscale=TRUE # do you want to show the enrichment as a log scale?
+  # )
+}
+
+saveRDS(enrich_df.list, "001Giotto_out/007spatial_coexpr/hdWGCNA/enrich_df.list.rds")
+# enrich_df.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/enrich_df.list.rds")
+
+```
+
+### Organize Module Annotation Table
+
+```{r}
+
+# 1. Classify modules based on module clustering analysis.
+# 2. Collect module information and organize into a table.
+
+# Column information:
+# 1. Module name
+# 2. Module size
+# 3. Overlap gene ratio in module
+# 4. Module hub genes
+# 5. Enrichment analysis
+# 6. Percentage of DEGs
+# 7. Interested genes included
+# 8. Differential network analysis results
+
+module_clusters <- readLines("001Giotto_out/007spatial_coexpr/hdWGCNA/module_clustering.list") # Module clustering
+mod.df.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/wgcna_modules.list.rds") # Extract module size
+module.hubgenes <- read.csv("001Giotto_out/007spatial_coexpr/hdWGCNA/hub_df.csv", row.names=1) # Module hub genes
+enrich.df <- enrich_df.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/enrich_df.list.rds") # Enrichment analysis
+st.DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1) # Percentage of DEGs in module
+# List of interested genes.
+
+
+# representative.module <- sapply(strsplit(module_clusters, ","), "[", 1)
+
+# Format conversion. From one large module per row to one small module per row.
+module_clusters.df <- data.frame(merged.module = rep(paste0("M", 1:length(module_clusters)),
+                                                     sapply(strsplit(module_clusters, ","), length)), 
+                                 module = unlist(strsplit(module_clusters, ",")))
+
+# Get module gene table.
+module.df <- lapply(mod.df.list, function(x){
+  y <- x[x$module != "grey", c("gene_name", "module", "treatment")]
+  return(y)
+})
+
+module.df <- Reduce(rbind, module.df)
+module.df$module <- factor(module.df$module, 
+                                     levels=c(paste0("WT", 1:15), paste0("AD", 1:14), paste0("PL", 1:15)),
+                                     ordered=T)
+module.df <- module.df[order(module.df$module), ]
+write.csv(module.df, "001Giotto_out/007spatial_coexpr/hdWGCNA/wgcna_module.csv", row.names=F)
+
+module.df$module <- as.character(module.df$module)
+
+# Calculate module size
+module.size <- data.frame(table(module.df$module))
+colnames(module.size) <- c("module", "module.size")
+
+module_clusters.df2 <- merge(module_clusters.df, module.size, by="module")
+module_clusters.df2 <- module_clusters.df2[order(module_clusters.df2$merged.module), ]
+
+# Calculate gene intersection of large modules.
+n.intersect.genes.vec <- c()
+for (M in unique(module_clusters.df2$merged.module)) {
+  # M <- "M1"
+  modules <- subset(module_clusters.df2, merged.module==M, select="module", drop=T)
+  modules.genes <- lapply(modules, function(x){
+    subset(module.df, module==x, select="gene_name", drop=T)}
+    )
+  n.intersect.genes <- length(Reduce(intersect, modules.genes))
+  n.intersect.genes.vec <- c(n.intersect.genes.vec, n.intersect.genes)
+}
+
+names(n.intersect.genes.vec) <- unique(module_clusters.df2$merged.module)
+
+module_clusters.df2$n.intersect.genes <- n.intersect.genes.vec[module_clusters.df2$merged.module]
+
+# Module hub genes
+
+hub.tmp <- aggregate(gene_name~module, FUN=function(x){paste(x, collapse=",")}, data=module.hubgenes)
+module_clusters.df3 <- merge(module_clusters.df2, hub.tmp, by="module")
+
+# Enrichment analysis
+# enrich_df.list, Term, module
+enrich_df <- Reduce(rbind, enrich_df.list)
+
+enrich.tmp <- aggregate(Term~module, function(x){paste(head(x, 3), collapse="; ")}, data=enrich_df)
+module_clusters.df4 <- merge(module_clusters.df3, enrich.tmp, by="module")
+
+# DEGs percentage
+tmp.df <- aggregate(gene_name~module, FUN=function(x){
+  n.genes <- length(x)
+  n.DEGs <- length(intersect(x, st.DEGs$gene))
+  DEGs.ratio.all <- n.DEGs/n.genes
+  DEGs.ratio.PL_vs_AD.up <- length(intersect(x, subset(st.DEGs, comparison=="PLX5622_vs_FADCtrl" & avg_log2FC > 0, select="gene", drop=T)))
+  DEGs.ratio.PL_vs_AD.down <- length(intersect(x, subset(st.DEGs, comparison=="PLX5622_vs_FADCtrl" & avg_log2FC < 0, select="gene", drop=T)))
+  DEGs.ratio.PL_vs_WT.up <- length(intersect(x, subset(st.DEGs, comparison=="PLX5622_vs_WTCtrl" & avg_log2FC > 0, select="gene", drop=T)))
+  DEGs.ratio.PL_vs_WT.down <- length(intersect(x, subset(st.DEGs, comparison=="PLX5622_vs_WTCtrl" & avg_log2FC < 0, select="gene", drop=T)))
+  DEGs.ratio.AD_vs_WT.up <- length(intersect(x, subset(st.DEGs, comparison=="FADCtrl_vs_WTCtrl" & avg_log2FC > 0, select="gene", drop=T)))
+  DEGs.ratio.AD_vs_WT.down <- length(intersect(x, subset(st.DEGs, comparison=="FADCtrl_vs_WTCtrl" & avg_log2FC < 0, select="gene", drop=T)))
+  c(DEGs.ratio.all = DEGs.ratio.all, 
+    DEGs.ratio.PL_vs_AD.up=DEGs.ratio.PL_vs_AD.up/n.genes, 
+    DEGs.ratio.PL_vs_AD.down=DEGs.ratio.PL_vs_AD.down/n.genes, 
+    DEGs.ratio.PL_vs_WT.up = DEGs.ratio.PL_vs_WT.up/n.genes, 
+    DEGs.ratio.PL_vs_WT.down = DEGs.ratio.PL_vs_WT.down/n.genes, 
+    DEGs.ratio.AD_vs_WT.up = DEGs.ratio.AD_vs_WT.up/n.genes, 
+    DEGs.ratio.AD_vs_WT.down = DEGs.ratio.AD_vs_WT.down/n.genes
+    )
+}, data=module.df)
+
+tmp.df <- do.call(data.frame, tmp.df)
+colnames(tmp.df) <- sub("gene_name.", "", colnames(tmp.df), fixed = T)
+
+module_clusters.df5 <- merge(module_clusters.df4, tmp.df, by="module")
+
+module_clusters.df5$merged.module <- factor(module_clusters.df5$merged.module, 
+                                            levels=paste0("M", 1:length(unique(module_clusters.df5$merged.module))), 
+                                            ordered=T)
+
+module_clusters.df5$module <- factor(module_clusters.df5$module, 
+                                     levels=c(paste0("WT", 1:15), paste0("AD", 1:14), paste0("PL", 1:15)),
+                                     ordered=T)
+
+module_clusters.df5 <- module_clusters.df5[order(module_clusters.df5$merged.module, module_clusters.df5$module), ]
+
+write.csv(module_clusters.df5, "001Giotto_out/007spatial_coexpr/hdWGCNA/module_annotation.csv")
+```
+
+
+### Custom Network Diagram
+
+```{r}
+library(ggraph)
+library(tidygraph)
+
+modules <- GetModules(seurat_obj) %>% 
+  subset(module != 'grey') %>% 
+  mutate(module = droplevels(module))
+mods <- levels(modules$module)
+TOM <- GetTOM(seurat_obj)
+format(object.size(TOM), units = "auto")
+# [1] "1.1 Gb"
+
+# get module colors for plotting 
+mod_colors <- dplyr::select(modules, c(module, color)) %>% distinct()
+mod_cp <- mod_colors$color; names(mod_cp) <- as.character(mod_colors$module)
+
+
+```
+
+
+
+## Trait Correlation
+
+Gene expression was batch corrected; should Aβ and cell proportions also be batch corrected?
+
+```{r}
+# env: dhlab, 001ST
+library(Seurat)
+library(hdWGCNA)
+library(dplyr)
+
+wgcna.obj.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/hdWGCNA.rds")
+
+# nrow(spot.anno.prop) == nrow(meta.Abeta)
+# Spots in both tables are the same, but order is different and needs to be aligned.
+if (F) {
+  # For Aβ focus
+  meta.Abeta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta.csv", row.names=1)
+  spot.anno.prop <- spot.anno.prop[meta.Abeta$cell_ID, ]
+  all(spot.anno.prop$cell.id == meta.Abeta$cell_ID)
+}
+
+# Batch correction
+# Experimental design
+if (F) {
+  library(limma)
+  meta <- st.seurat@meta.data
+  meta$batch <- as.factor(meta$batch)
+  design=model.matrix(~cell_types+treatment, data = meta)
+  
+  expr.corrected <- as.data.frame(t(removeBatchEffect(t(trait.matrix), 
+                                     batch=meta$batch, 
+                                     covariates = meta$nCount_RNA, 
+                                     design=design)))
+}
+
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/cell_cor")
+
+for (LEVEL in c("anno.L2", "anno.L3")) {
+  in.path <- paste0("001Giotto_out/cell2location2/", LEVEL, ".spot.anno.prop.csv")
+  
+  spot.anno.prop <- read.csv(in.path, row.names=1)
+  
+  row.names(spot.anno.prop) <- spot.anno.prop$cell.id
+  
+  mt_cor.list <- list()
+
+  for (treatment in names(wgcna.obj.list)) {
+    if (F) {
+      # test
+      treatment <- "PLX5622" 
+    }
+    # Cells in both tables aligned according to wgcna.obj order.
+    seurat_obj <- wgcna.obj.list[[treatment]]
+    cell.ids <- row.names(seurat_obj@meta.data)
+    
+    # Merge trait values (cell proportions) into seurat_obj
+    seurat_obj@meta.data <- cbind(seurat_obj@meta.data, spot.anno.prop[cell.ids, ])
+    
+    seurat_obj <- ModuleTraitCorrelation(
+      seurat_obj,
+      traits = colnames(spot.anno.prop)[-(1:3)] # Specify traits of interest, here all cells.
+    )
+    
+    mt_cor.list[[treatment]] <- seurat_obj@misc$ST$mt_cor
+    
+  }
+  saveRDS(mt_cor.list, paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/cell_cor/mt_cor.list.", LEVEL, ".rds"))
+}
+
+
+dir.create(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/PlotModuleTraitCorrelation.", LEVEL))
+
+
+# mt_cor.list$PLX5622$cor$all_cells
+
+LEVEL <- "anno.L3"
+
+for (LEVEL in c("anno.L2", "anno.L3")) {
+  if (F) {
+    # test
+    LEVEL <- "anno.L2"
+  }
+  in.path <- paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/cell_cor/mt_cor.list.", LEVEL, ".rds")
+  mt_cor.list <- readRDS(in.path)
+  
+  for (treatment in names(wgcna.obj.list)) {
+    # treatment <- "PLX5622"
+    seurat_obj <- wgcna.obj.list[[treatment]]
+    
+    # Extract the cor$all_cells table, perform clustering
+    # Then reorder both cor$all_cells and fdr$all_cells based on this order.
+    df.cor <- mt_cor.list[[treatment]]$cor$all_cells
+    cluster.obj <- pheatmap::pheatmap(df.cor)
+    ordered.row <- cluster.obj$tree_row$labels[cluster.obj$tree_row$order]
+    ordered.col <- cluster.obj$tree_col$labels[cluster.obj$tree_col$order]
+    
+    df.fdr <- mt_cor.list[[treatment]]$fdr$all_cells
+    mt_cor.list[[treatment]]$cor$all_cells <- df.cor[ordered.row, ordered.col]
+    mt_cor.list[[treatment]]$fdr$all_cells <- df.fdr[ordered.row, ordered.col]
+    
+    seurat_obj@misc$ST$mt_cor <- mt_cor.list[[treatment]]
+    
+    p <- PlotModuleTraitCorrelation(
+      seurat_obj,
+      label = 'fdr',
+      label_symbol = 'stars',
+      text_size = 2,
+      text_digits = 2,
+      text_color = 'white',
+      high_color = 'red',
+      mid_color = 'black',
+      low_color = 'blue',
+      plot_max = 0.5,
+      combine=F
+    )
+    
+    out.path <- paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/cell_cor/", 
+                       LEVEL, ".", treatment, ".ModuleTraitCorrelation.pdf" )
+    if (LEVEL == "anno.L3") {
+      ggsave(out.path, p$all_cells, width=7, height=20)
+    } else {
+      ggsave(out.path, p$all_cells, width=7, height=6)
+    }
+    
+  }
+}
+```
+
+## Differential Module Eigengene (DME) Analysis
+
+The two treatments are not in the same Seurat object, how to proceed?
+
+According to the description in the tutorial, I should use the data of the three treatments in a specific brain region to construct the network before comparing the differences between kME.
+
+In fact, I only need to know which genes are included in the module, and then I can use `Seurat::AddModuleScore` or `UCell::AddModuleScore_UCell` to compare.
+
+hdWGCNA provides a method for network construction on specific cell subpopulations, `SetDatExpr`. However, if I perform network construction on multiple cell types, how will the results be stored?
+
+In a specific WGCNA object, I clearly used metaspots to build the network, but slots such as kME include all cells instead of only metaspots. Why?
+
+```{r}
+
+DMEs <- FindDMEs(
+  seurat_obj,
+  barcodes1 = group1,
+  barcodes2 = group2,
+  test.use='wilcox',
+  wgcna_name='INH'
+)
+
+PlotDMEsVolcano(
+  seurat_obj,
+  DMEs,
+  wgcna_name = 'INH'
+)
+
+```
+
+
+## Differential Network Analysis
+
+### Module Preservation Analysis
+
+Question: Might the results of PL vs AD and AD vs PL be different?
+
+The network where C1qa is located seems to have no significant changes, whether in PL vs AD or WT vs AD.
+
+Why is it that Trem2 and Tyrobp are clearly only present in the AD4 module of FADCtrl, but when comparing PLX5622 vs FADCtrl, it shows that AD4 has not undergone significant changes? Is it because there are too many irrelevant genes? Should a sub-module analysis be performed?
+
+```{r}
+
+wgcna.obj.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/hdWGCNA.rds")
+
+projected.list <- list()
+
+comparisons <- c("PLX5622_vs_FADCtrl", 
+                 "WTCtrl_vs_FADCtrl", 
+                 "FADCtrl_vs_PLX5622", 
+                 "FADCtrl_vs_WTCtrl", 
+                 "PLX5622_vs_WTCtrl", 
+                 "WTCtrl_vs_PLX5622")
+
+for (comp in comparisons) {
+
+# do.compare <- function(comp) {
+  comp <- strsplit(comp, "_vs_")
+  qry <- comp[[1]][1]
+  ref <- comp[[1]][2]
+
+  # Project query genes into reference modules.
+  # i.e., answer: which reference module do the query genes belong to?
+  # This method creates a new slot named 'projected' under sobj@misc in the query object, storing the projection info.
+  seurat.qry <- hdWGCNA::ProjectModules(
+    seurat_obj = wgcna.obj.list[[qry]],
+    seurat_ref = wgcna.obj.list[[ref]],
+    wgcna_name = "ST",
+    wgcna_name_proj="projected",
+    assay="RNA" # assay for query dataset
+  )
+  
+  # set expression matrix for reference dataset
+  # Both query and reference use metaspots.
+  seurat.ref <- hdWGCNA::SetDatExpr(
+    wgcna.obj.list[[ref]],
+    use_metacells = T, 
+    group_name = NULL,
+    group.by = NULL
+  )
+  
+  seurat.qry@misc$projected$wgcna_metacell_obj <- wgcna.obj.list[[qry]]@misc$ST$wgcna_metacell_obj
+  
+  # set expression matrix for query dataset:
+  seurat.qry <- hdWGCNA::SetDatExpr(
+    seurat.qry,
+    use_metacells = T, 
+    group_name = NULL,
+    group.by = NULL
+  )
+  
+  # Calculate module preservation.
+  seurat.qry <- hdWGCNA::ModulePreservation(
+    seurat_qry,
+    seurat_ref = seurat.ref,
+    name=paste0(qry, "_vs_", ref),
+    verbose=3,
+    n_permutations=100 # n_permutations=20 used for the tutorial
+  )
+  
+  projected.list[[paste0(qry, "_vs_", ref)]] <- seurat.qry
+  # return(seurat.qry)
+}
+
+
+# Attempt multi-threading:
+# library(parallel) 
+# cl <- makeCluster(6)  
+# projected.list <- parLapply(cl, comparisons, do.compare) # Could not detect wgcna.obj.list
+
+# library(future.apply)
+# options(future.globals.maxSize= 24*1024^3)
+# plan(multisession) ## Run in parallel on local computer
+# projected.list <- future_lapply(comparisons, FUN = do.compare) # Bug: consumed massive resources and locked system.
+
+# projected.list[["PLX5622_vs_FADCtrl"]] <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/projected.PL_vs_AD.rds")
+
+saveRDS(projected.list, "001Giotto_out/007spatial_coexpr/hdWGCNA/projected.list.rds")
+
+mod.pre.list <- list()
+for (comp in names(projected.list)) {
+  mod.pre <- projected.list[[comp]]@misc$projected$module_preservation[[comp]]$Z
+  mod.pre$module <- row.names(mod.pre)
+  mod.pre$comparison <- comp
+  mod.pre.list[[comp]] <- mod.pre
+}
+
+mod.pre.df <- Reduce(rbind, mod.pre.list)
+
+write.csv(mod.pre.df, "001Giotto_out/007spatial_coexpr/hdWGCNA/module_preservation.csv")
+
+mod.pre.df <- read.csv("001Giotto_out/007spatial_coexpr/hdWGCNA/module_preservation.csv", row.names=1)
+
+for (comp in names(projected.list)) {
+  cat(comp, "\n")
+  mod.pre <- projected.list[[comp]]@misc$projected$module_preservation[[comp]]$Z
+  print(subset(mod.pre, Zsummary.pres < 15))
+  cat("\n")
+}
+
+# Check changes in AD4 (588 genes).
+projected.list$PLX5622_vs_FADCtrl@misc$projected$module_preservation$PLX5622_vs_FADCtrl$Z
+
+# Drug treatment group shows a rescued trend in WT2 module compared to AD group.
+row.names(subset(wgcna.obj.list$WTCtrl@misc$ST$wgcna_modules, module == "WT2"))
+# Ctsd, S100a6, Tgfbr3, Igf2, etc.
+
+```
+
+### Differential Network Analysis: NetRep
+
+
+
+```{r PlotModulePreservationLollipop}
+
+
+
+# PlotModulePreservationLollipop should be in the new version of hdWGCNA.
+
+# The one on dhlab is an old version (0.3.1); might need to upgrade to 0.4.09 to use this function.
+
+
+
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/ModulePreservationLollipop")
+
+
+
+comparisons <- c("PLX5622_vs_FADCtrl", 
+
+                 "WTCtrl_vs_FADCtrl", 
+
+                 "FADCtrl_vs_PLX5622", 
+
+                 "FADCtrl_vs_WTCtrl", 
+
+                 "PLX5622_vs_WTCtrl", 
+
+                 "WTCtrl_vs_PLX5622")
+
+
+
+NetRep.list <- list()
+
+
+
+for (comp in comparisons) {
+
+  if (comp == "FADCtrl_vs_WTCtrl") next
+
+  # comp <- "FADCtrl_vs_WTCtrl"
+
+  comp.split <- strsplit(comp, "_vs_")
+
+  qry <- comp.split[[1]][1]
+
+  ref <- comp.split[[1]][2]
+
+  
+
+  seurat.qry = wgcna.obj.list[[qry]]
+
+  seurat.ref = wgcna.obj.list[[ref]]
+
+  
+
+  # seurat.qry <- SetActiveWGCNA(seurat.qry, 'projected')
+
+  
+
+  seurat.qry <- hdWGCNA::ProjectModules(
+
+    seurat_obj = seurat.qry,
+
+    seurat_ref = seurat.ref,
+
+    wgcna_name = "ST",
+
+    wgcna_name_proj="projected",
+
+    assay="RNA" # assay for query dataset
+
+  )
+
+    
+
+  seurat.qry@misc$projected$wgcna_metacell_obj <- seurat.qry@misc$ST$wgcna_metacell_obj
+
+  
+
+  seurat.qry <- hdWGCNA::SetDatExpr(
+
+    seurat.qry,
+
+    use_metacells = T, 
+
+    group_name = NULL,
+
+    group.by = NULL
+
+  )
+
+    
+
+  # run NetRep module preservation
+
+  seurat.qry <- ModulePreservationNetRep(
+
+    seurat.qry,
+
+    seurat.ref,
+
+    name = comp,
+
+    n_permutations = 5000,
+
+    n_threads=40, # number of threads to run in Parallel
+
+    TOM_use="ST", # specify the name of the hdWGCNA experiment that contains the TOM for the query dataset
+
+    wgcna_name = 'projected',
+
+    wgcna_name_ref = 'ST'
+
+  )
+
+  
+
+  # access the results:
+
+  mod_pres <- GetModulePreservation(seurat.qry, comp, 'projected')
+
+  
+
+  NetRep.list[[comp]] <- mod_pres
+
+  
+
+  # access statistics for each module:
+
+  # mod_pres$p.values
+
+  
+
+  p <- PlotModulePreservationLollipop(
+
+    seurat.qry, 
+
+    name=comp,
+
+    features='average',
+
+    wgcna_name='projected'
+
+  ) + RotatedAxis() + NoLegend()
+
+  
+
+  ggsave(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/ModulePreservationLollipop/", comp, ".ModulePreservationLollipop.pdf"), p, width=3.5, height=7)
+
+}
+
+
+
+saveRDS(NetRep.list, "001Giotto_out/007spatial_coexpr/hdWGCNA/NetRep.list.rds")
+
+
+
+```
+
+
+
+#### Lollipop Plot Improvement
+
+
+
+Used hdWGCNA's `PlotModulePreservationLollipop` to show preservation between modules. The horizontal axis is module ID, the vertical axis title is -log10 (Avg. FDR), and there is no main title. I want to modify the vertical axis title or the main title to make the meaning of the chart more intuitive. How to modify it?
+
+
+
+Cannot install hdWGCNA. Time is limited, will modify directly in AI.
+
+
+
+```{r}
+
+# Reference: https://smorabit.github.io/hdWGCNA/articles/module_preservation.html
+
+
+
+# remotes::install_github('smorabit/hdWGCNA', ref='dev') failed.
+
+# Use previously installed conda environment:
+
+# 
+
+
+
+library(ggplot2)
+
+library(patchwork)
+
+library(Seurat)
+
+library(hdWGCNA)
+
+
+
+install.packages('NetRep')
+
+
+
+# env: dhlab-17, docker_lch/giotto_suite3_lch:0.2.6
+
+
+
+setwd("/home/mouse_ad/001ST/")
+
+
+
+comparisons <- c("PLX5622_vs_FADCtrl", 
+
+                 "WTCtrl_vs_FADCtrl", 
+
+                 "FADCtrl_vs_PLX5622", 
+
+                 "FADCtrl_vs_WTCtrl", 
+
+                 "PLX5622_vs_WTCtrl", 
+
+                 "WTCtrl_vs_PLX5622")
+
+
+
+wgcna.obj.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/hdWGCNA.rds")
+
+NetRep.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/NetRep.list.rds")
+
+
+
+comp <- "WTCtrl_vs_PLX5622"
+
+qry <- "WTCtrl"
+
+seurat.qry <- wgcna.obj.list[[qry]]
+
+
+
+p <- PlotModulePreservationLollipop(
+
+  seurat.qry, 
+
+  name=comp,
+
+  features='average',
+
+  wgcna_name='projected'
+
+) + RotatedAxis() + NoLegend()
+
+
+
+ggsave("001Giotto_out/007spatial_coexpr/hdWGCNA/ModulePreservationLollipop/ModulePreservationLollipop.pdf", p)
+
+```
+
+
+
+
+
+### Merge results from two differential network analyses
+
+
+
+```{r module-preservation-merged-csv}
+
+NetRep.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/NetRep.list.rds")
+
+mod.pre.df <- read.csv("001Giotto_out/007spatial_coexpr/hdWGCNA/module_preservation.csv", row.names=1)
+
+
+
+mod.pre.df.sub <- mod.pre.df[, c("module", "Zsummary.pres", "comparison")]
+
+
+
+
+
+comparisons <- c("PLX5622_vs_FADCtrl", 
+
+                 "WTCtrl_vs_FADCtrl", 
+
+                 "FADCtrl_vs_PLX5622", 
+
+                 "FADCtrl_vs_WTCtrl", 
+
+                 "PLX5622_vs_WTCtrl", 
+
+                 "WTCtrl_vs_PLX5622")
+
+
+
+netrep.data.list <- list()
+
+
+
+for (comp in comparisons) {
+
+  # comp <- comparisons[[1]]
+
+  seurat.qry <- projected.list[[comp]]
+
+  seurat.qry@misc$projected$module_preservation[["netrep"]] <- NetRep.list[[comp]]
+
+  
+
+  p <- PlotModulePreservationLollipop(
+
+      seurat.qry, 
+
+      name="netrep",
+
+      features='average',
+
+      wgcna_name='projected'
+
+    ) + RotatedAxis() + NoLegend()
+
+  
+
+  p.data <- p$data
+
+  p.data$comp <- comp
+
+  
+
+  netrep.data.list[[comp]] <- p.data
+
+}
+
+
+
+netrep.data.df <- Reduce(rbind, netrep.data.list)
+
+netrep.data.df.sub <- netrep.data.df[, c("module", "value", "comp")]
+
+
+
+
+
+merged.df <- merge(netrep.data.df.sub, mod.pre.df.sub, by.x=c("comp", "module"), by.y=c("comparison", "module"))
+
+
+
+write.csv(merged.df, "001Giotto_out/007spatial_coexpr/hdWGCNA/module_preservation.merged.csv")
+
+
+
+```
+
+
+
+
+### 差异网络分析绘图
+
+```{r PlotModulePreservation}
+
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/PlotModulePreservation")
+
+comparisons <- c("PLX5622_vs_FADCtrl", 
+                 "WTCtrl_vs_FADCtrl", 
+                 "FADCtrl_vs_PLX5622", 
+                 "FADCtrl_vs_WTCtrl", 
+                 "PLX5622_vs_WTCtrl", 
+                 "WTCtrl_vs_PLX5622")
+
+for (comp in comparisons) {
+  # comp <- "FADCtrl_vs_WTCtrl"
+  seurat.qry <- projected.list[[comp]]
+  
+  # get the module preservation table
+  #mod_pres <- GetModulePreservation(seurat.qry, comp)$Z
+  #obs_df <- GetModulePreservation(seurat.qry, comp)$obs
+  
+  plot_list <- PlotModulePreservation(
+    seurat.qry,
+    name=comp,
+    statistics = "summary"
+  )
+  
+  p <- wrap_plots(plot_list, ncol=2)
+  
+  ggsave(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/PlotModulePreservation/", comp, ".PlotModulePreservation.jpg"), p, width=10, height=5)
+}
+```
+
+
+### 调查筛选出的模块
+
+```{r}
+
+# 都包含什么基因？
+row.names(subset(wgcna.obj.list$WTCtrl@misc$ST$wgcna_modules, module=="WT2"))
+row.names(subset(wgcna.obj.list$WTCtrl@misc$ST$wgcna_modules, module=="WT9"))
+
+# 发生了什么变化？
+mod.pre.df <- read.csv("001Giotto_out/007spatial_coexpr/hdWGCNA/module_preservation.csv", row.names=1)
+
+mod.pre.df[mod.pre.df$Zsummary.pres < 20, c("moduleSize", "Zsummary.pres", "Zconnectivity.pres", "module", "comparison")]
+```
+
+
+### Show Network Topology Comparison
+
+```{r ModuleTopologyBarplot}
+
+# remotes::install_github('smorabit/hdWGCNA', ref='dev') # ModuleTopologyHeatmap is only in hdWGCNA_0.4.00+
+# library(hdWGCNA)
+
+wgcna.obj.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/hdWGCNA.rds")
+projected.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/projected.list.rds")
+
+dir.create("001Giotto_out/007spatial_coexpr/hdWGCNA/ModuleTopologyHeatmap")
+
+comparisons <- c("PLX5622_vs_FADCtrl", 
+                 "WTCtrl_vs_FADCtrl", 
+                 "FADCtrl_vs_PLX5622", 
+                 "FADCtrl_vs_WTCtrl", 
+                 "PLX5622_vs_WTCtrl", 
+                 "WTCtrl_vs_PLX5622")
+
+# seurat.qry <- ModuleEigengenes(seurat.qry) # Module Eigengenes (MEs) 
+# eigengene-based connectivity, also known as kME
+
+# select the module to plot
+cur_mods <- c('WT14')
+
+cur_mods <- c("PL12", 'WT2', "WT7", "WT8", "WT9", "AD13", "PL6", "PL9", "PL11", "PL14")
+
+for (cur_mod in cur_mods) {
+  cat("cor_mod: ", cur_mod, "\n")
+  if (grepl("WT", cur_mod)) {
+    comps <- grep("WTCtrl$", comparisons, value=T)
+  } else if (grepl("AD", cur_mod)) {
+    comps <- grep("FADCtrl$", comparisons, value=T)
+  } else if (grepl("PL", cur_mod)) {
+    comps <- grep("PLX5622$", comparisons, value=T)
+  }
+  
+  for (comp in comps) {
+    # comp <- "FADCtrl_vs_WTCtrl"
+    comp.splited <- strsplit(comp, "_vs_")
+    qry <- comp.splited[[1]][1]
+    ref <- comp.splited[[1]][2]
+    
+    seurat.ref <- wgcna.obj.list[[ref]]
+    seurat.qry <- projected.list[[comp]]
+    
+    seurat.qry <- ModuleConnectivity(seurat.qry, TOM_use="ST") 
+    
+    resetDegreesName <- function(seurat_obj, wgcna_name) {
+      mod.df <- seurat_obj@misc[[wgcna_name]]$wgcna_modules
+      gene2module <- mod.df$module
+      names(gene2module) <- mod.df$gene_name
+      degrees.gene_name <- seurat_obj@misc[[wgcna_name]]$wgcna_degrees$gene_name
+      seurat_obj@misc[[wgcna_name]]$wgcna_degrees$module <- gene2module[degrees.gene_name]
+      seurat_obj
+    }
+    
+    seurat.ref <- resetDegreesName(seurat.ref, "ST")
+    seurat.qry <- resetDegreesName(seurat.qry, "projected")
+    
+    # plot the correlation matrix in the reference dataset
+    tmp <- ModuleTopologyHeatmap(
+        seurat.ref,
+        mod = cur_mod,
+        matrix = "Cor",
+        order_by = 'degree',
+        TOM_use = 'ST',
+        wgcna_name = 'ST',
+        high_color = 'red',
+        type = 'unsigned',
+        plot_max = 0.75,
+        return_genes = TRUE # select this option to get the gene order
+    )
+    
+    # get the plot from the output list
+    p1 <- tmp[[1]] + ggtitle('Reference') + ylab('Correlation') + NoLegend()
+    
+    # get the gene order from the output list
+    gene_list <- tmp[[2]]
+    
+    # plot the correlation matrix in the query dataset
+    p2 <- ModuleTopologyHeatmap(
+        seurat.qry,
+        mod = cur_mod,
+        matrix = "Cor",
+        order_by = 'degree',
+        wgcna_name = 'projected',
+        high_color = 'red',
+        type = 'unsigned',
+        plot_max = 0.75,
+        genes_order = gene_list
+    ) + ggtitle('Query') 
+    
+    # p <- p1 | p2
+    
+    # ggsave(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/", comp, ".", cur_mod, ".ModuleTopologyHeatmap.jpg"), p, width=10, height=5)
+    
+    # -----------------------------------------------------------------
+    # plot the TOM in the reference dataset
+    p3 <- ModuleTopologyHeatmap(
+        seurat.ref,
+        mod = cur_mod,
+        matrix = "TOM",
+        order_by = 'degree',
+        wgcna_name = 'ST',
+        high_color = 'seagreen',
+        genes_order = gene_list,
+        plot_max = 0.05
+    ) + ylab('Network edge weight') + NoLegend()
+    
+    # plot the TOM in the query dataset
+    p4 <- ModuleTopologyHeatmap(
+        seurat.qry,
+        mod = cur_mod,
+        matrix = "TOM",
+        order_by = 'degree',
+        TOM_use = 'ST',
+        wgcna_name = 'projected',
+        high_color = 'seagreen',
+        plot_max = 0.05,
+        genes_order = gene_list
+    ) 
+    
+    
+    # plot the degree in the reference dataset
+    p5 <- ModuleTopologyBarplot(
+        seurat.ref, 
+        mod = cur_mod,
+        features = 'weighted_degree',
+        genes_order = gene_list,
+        wgcna_name = 'ST',
+    ) + NoLegend()
+    
+    # plot the degree in the query dataset
+    p6 <- ModuleTopologyBarplot(
+        seurat.qry, 
+        mod = cur_mod,
+        features = 'weighted_degree',
+        genes_order = gene_list,
+        wgcna_name = 'projected'
+    )+ NoLegend()
+    
+    # plot the kME in the reference dataset
+    tmp <- ModuleTopologyBarplot(
+        seurat.ref, 
+        mod = cur_mod,
+        features = 'kME',
+        wgcna_name = 'ST',
+        return_genes=TRUE
+    )
+    p7 <- tmp[[1]] + NoLegend()
+    gene_list2 <- tmp[[2]]
+    
+    # plot the kME in the query dataset
+    p8 <- ModuleTopologyBarplot(
+        seurat.qry, 
+        mod = cur_mod,
+        features = 'kME',
+        genes_order = gene_list2,
+        wgcna_name = 'projected'
+    )+ NoLegend()
+    
+    # assemble patch:
+    patch <- (p1 | p2) / (p3 | p4) / (p5 | p6) / (p7 | p8) + 
+        plot_layout(heights=c(3,3,1,1)) &
+        plot_annotation(title = paste0(cur_mod, ' topology comparison')) &
+        theme(plot.title=element_text(hjust=0.5))
+    
+    ggsave(paste0("001Giotto_out/007spatial_coexpr/hdWGCNA/ModuleTopologyHeatmap/", comp, ".", cur_mod, ".ModuleTopologyHeatmap.jpg"), patch, width=10, height=5*3)
+  }
+}
+```
+
+## Downstream Analysis
+
+### Miscellaneous
+
+```{r}
+a <- subset(wgcna.obj.list$PLX5622@misc$ST$wgcna_modules, module=="PL12", select=c("gene_name", "kME_PL12"))
+a <- a[order(a$kME_PL12, decreasing=T), ]
+
+b <- subset(mod.df.list$PLX5622, module=="PL14", select=c("gene_name", "kME_PL14"))
+b <- b[order(b$kME_PL14, decreasing=T), ]
+
+# Check if PL12 genes have DEGs (ST, SC)
+mod.df <- read.csv("001Giotto_out/007spatial_coexpr/hdWGCNA/wgcna_module.csv")
+st.DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1) # Percentage of DEGs in module
+sc.DEGs <- read.csv("../002SC/001Seurat_out/004DEGs/wilcox.L1/sc.DEGs.csv", row.names=1)
+
+PL12.genes <- subset(mod.df, module == "PL12", select="gene_name", drop=T) 
+
+subset(st.DEGs, gene %in% PL12.genes & comparison == "PLX5622_vs_FADCtrl") # Many genes changed, but not specifically in the thalamus.
+
+subset(sc.DEGs, gene %in% PL12.genes & comparison == "AD_5622_vs_AD_ctrl") # Fewer changed genes, and not concentrated in specific cell types.
+#                 p_val avg_log2FC pct.1 pct.2    p_val_adj celltype
+# Uqcrh    8.137785e-09  0.1104545 0.106 0.052 2.060894e-04  Oligo_0
+# Cox5b    1.396939e-06  0.1517930 0.335 0.118 3.537748e-02    Glu_7
+# Slc25a41 4.134369e-11  0.1908438 0.454 0.261 1.047029e-06    Glu_0
+# Ndufs5   2.742463e-08  0.2199709 0.332 0.127 6.945288e-04   GABA_6
+# Ndufb8   1.880580e-09  0.1002797 0.238 0.106 4.762568e-05    Glu_1
+#                  comparison    gene
+# Uqcrh    AD_5622_vs_AD_ctrl   Uqcrh
+# Cox5b    AD_5622_vs_AD_ctrl   Cox5b
+# Slc25a41 AD_5622_vs_AD_ctrl Slc25a4
+# Ndufs5   AD_5622_vs_AD_ctrl  Ndufs5
+# Ndufb8   AD_5622_vs_AD_ctrl  Ndufb8
+
+PL14.genes <- subset(mod.df, module == "PL14", select="gene_name", drop=T) 
+
+subset(st.DEGs, gene %in% PL14.genes & comparison == "PLX5622_vs_FADCtrl")
+
+subset(sc.DEGs, gene %in% PL14.genes & comparison == "AD_5622_vs_AD_ctrl")
+
+mod <- "PL10"
+mod.genes <- subset(mod.df, module == mod, select="gene_name", drop=T) 
+subset(st.DEGs, gene %in% mod.genes & comparison == "PLX5622_vs_FADCtrl") # Mostly downregulated. Rab1a;Gabarapl1;Map1lc3a;Ubqln2 enriched in autophagosome-related pathways.
+subset(sc.DEGs, gene %in% mod.genes & comparison == "AD_5622_vs_AD_ctrl") # More upregulated genes.
+
+subset(st.DEGs, gene %in% c("Rab1a", "Gabarapl1", "Map1lc3a", "Ubqln2") & comparison == "PLX5622_vs_FADCtrl") # Rab1a, Map1lc3a downregulated.
+subset(sc.DEGs, gene %in% c("Rab1a", "Gabarapl1", "Map1lc3a", "Ubqln2") & comparison == "AD_5622_vs_AD_ctrl") # No DEGs.
+
+# Compare rescued ratios of mt and nucleus-encoded OXPHOS genes
+st.DEGs.up_rescued <- readLines("001Giotto_out/003DEGs/wilcox/st.DEGs.up_rescued.list")
+
+length(intersect(PL14.genes, df.rescued.up$gene))/length(PL14.genes) # 0.5862069, PL14 genes have a higher rescued ratio.
+length(intersect(PL12.genes, df.rescued.up$gene))/length(PL12.genes) # 0.25
+```
+
+### Extract Correlation Coefficients for Specific Gene Pairs
+
+Use the matrix previously constructed by Giotto.
+
+```{r}
+setwd("/home/mouse_ad/")
+
+# Organize into the following columns:
+# sample, gene1, gene2, coefficient
+
+# Issue: P2ry12 does not belong to spatial genes. Neither does Tmem119.
+
+gene_pairs <- c("Gfap~Trem2", "Gfap~Slc1a2", "Gfap~P2ry12", "Trem2~Slc1a2", "Trem2~P2ry12", "Slc1a2~P2ry12")
+
+out.df <- data.frame()
+for (sample in c("WTCtrl_1", "FADCtrl_1", "PLX5622_1", "WTCtrl_2", "FADCtrl_2", "PLX5622_2")) {
+  a_list <- readRDS(paste0("001ST/001Giotto_out/007spatial_coexpr/spatial_correlated/spat_cor_netw_DT.", sample, ".rds"))
+  a_df <- a_list$cor_DT
+  a_df$gene_pair <- paste0(a_df$feat_ID, "~", a_df$variable)
+  a_df.sub <- subset(a_df, gene_pair %in% gene_pairs)
+  a_df.sub$sample <- sample
+  out.df <- rbind(out.df, a_df.sub)
+}
+
+# Calculate manually.
+gobj <- readRDS("001ST/001Giotto_out/testcombo.rds")
+meta <- pDataDT(gobj)
+expr <- gobj@expression$cell$rna$normalized@exprMat
+
+collector <- list(sample=c(), gene1=c(), gene2=c(), estimate=c(), pvalue=c())
+
+n <- 1
+for (sample in c("WTCtrl_1", "FADCtrl_1", "PLX5622_1", "WTCtrl_2", "FADCtrl_2", "PLX5622_2")) {
+  for (gene_pair in gene_pairs) {
+    g1 <- strsplit(gene_pair, "~")[[1]][1]
+    g2 <- strsplit(gene_pair, "~")[[1]][2]
+    g1.expr <- expr[g1, meta$list_ID == sample]
+    g2.expr <- expr[g2, meta$list_ID == sample]
+    r.test <- cor.test(g1.expr, g2.expr, method="spearman")
+    collector[["sample"]][n] <- sample
+    collector[["gene1"]][n] <- g1
+    collector[["gene2"]][n] <- g2
+    collector[["estimate"]][n] <- r.test$estimate
+    collector[["pvalue"]][n] <- r.test$p.value
+    n <- n + 1
+  }
+}
+
+out.df <- data.frame(collector)
+
+write.csv(out.df, "001ST/001Giotto_out/007spatial_coexpr/spatial_correlated/cor_test_between_Gfap_Trem2_P2ry12_Slc1a2.csv")
+
+# Plotting
+library(ggplot2)
+out.df$gene_pair <- paste0(out.df$gene1, "~", out.df$gene2)
+out.df$is.significant <- out.df$pvalue < 0.05
+out.df$sample <- factor(out.df$sample, levels=c("WTCtrl_1", "FADCtrl_1", "PLX5622_1", "WTCtrl_2", "FADCtrl_2", "PLX5622_2"), ordered=T)
+
+p <- ggplot(out.df, aes(gene_pair, estimate, fill=is.significant)) + geom_bar(stat="identity") + 
+  coord_flip() + facet_wrap(.~sample, nrow = 2)
+ggsave("001ST/001Giotto_out/007spatial_coexpr/spatial_correlated/cor_test_between_Gfap_Trem2_P2ry12_Slc1a2.jpg", p, width=7, height=4)
+```
+
+### Spatial Plot for Specific Modules
+
+```{r}
+
+setwd("/home/mouse_ad/001ST")
+wgcna.obj.list <- readRDS("001Giotto_out/007spatial_coexpr/hdWGCNA/hdWGCNA.rds")
+
+all(wgcna.obj.list$PLX5622@misc$ST$hMEs$PL8 == wgcna.obj.list$PLX5622@misc$ST$MEs$PL8)
+
+# Output: [1] TRUE
+# MEs: Quantify the gene co-expression patterns of the module itself, used for correlation analysis between modules or with phenotype data.
+# hMEs: While preserving biological variation, remove variation introduced by technical batches (e.g., different sequencing batches, sample sources), making subsequent analyses (especially cross-sample or cross-condition comparisons) more accurate.
+
+# meta.st <- readRDS("../plot_gene/shinyapp/data/meta.st.rds")
+# nrow(meta.st)
+# # [1] 18259
+# nrow(df.MEs)
+# # [1] 6036
+
+MEs.list <- list(
+  df.MEs.WT = wgcna.obj.list$WTCtrl@misc$ST$MEs,
+  df.MEs.AD = wgcna.obj.list$FADCtrl@misc$ST$MEs,
+  df.MEs.PL = wgcna.obj.list$PLX5622@misc$ST$MEs
+)
+
+saveRDS(MEs.list, "001Giotto_out/007spatial_coexpr/hdWGCNA/MEs.list.rds")
+```
+
+
+## About Submodules
+
+By setting `minModuleSize` to 20, more clusters can be obtained. However, some modules will report errors when re-running the code below.
+For example:
+1. When there is only 1 module after re-clustering, an error occurs.
+2. Or when the number of genes in the module is small, `TestSoftPowers` may fail to select a k value that makes the index greater than 0.8.
+3. If `ModuleEigengenes` or `ModuleConnectivity` were run before and the results were not deleted, it also seems to report an error.
+4. Finally, there is an error for which the cause could not be found no matter what, so this method was abandoned and `minModuleSize` was set to 20 directly above.
+
+
+

@@ -1,0 +1,2375 @@
+
+# ST Differential Expression Analysis
+
+【Purpose】 Identify brain region-specific differentially expressed genes. Investigate the effects of drug treatment on the transcriptome level across different brain regions.
+【Method】 For the differential expression gene identification section, use the results from Wilcoxon test, apply filtering, and then perform analysis once from a hypothesis-driven perspective and once from a data-driven perspective. Finally, display the expression patterns of the selected genes/pathways.
+
+## DEGs Identification: wilcox
+Use the wilcox method in `Seurat::FindMarkers` for DEGs identification. Compare the number of DEGs obtained under different log2FC thresholds.
+
+```{r eval=FALSE}
+source("script/load_checkpoint.r")
+deg.outdir <- paste0(save_dir, "003DEGs/")
+if (! dir.exists(deg.outdir)) dir.create(deg.outdir)
+expr <- get_expression_values(testcombo)
+f <- file("001Giotto_out/003DEGs/background.txt", "w")
+cat("_BACKGROUND\t", paste(row.names(expr@exprMat), collapse=","), "\n", sep="", file=f)
+close(f)
+pairs <- list()
+pairs[[1]] <- c("PLX5622", "FADCtrl")
+pairs[[2]] <- c("FADCtrl", "WTCtrl")
+pairs[[3]] <- c("PLX5622", "WTCtrl")
+```
+
+### Seurat::FindMarkers
+```{r eval=FALSE}
+# Original script: script/003identify_DEGs.wilcox.r
+#-------------------------#
+# Use Seurat::FindMarkers #
+#-------------------------#
+Giotto2Seurat <- function(obj){
+  library(Seurat)
+  expr <- get_expression_values(obj)@exprMat
+  meta <- as.data.frame(pDataDT(obj))
+  row.names(meta) <- meta$cell_ID
+  obj.seurat <- CreateSeuratObject(counts=expr, meta.data=meta)
+  obj.seurat <- NormalizeData(obj.seurat)
+  return(obj.seurat)
+}
+# bug: MAST:::checkAssayNames line 131
+# if(!isTRUE(all.equal(dn[[1]], fData$primerid))) stop('Order of `exprsArray` and `fData` doesn\'t match')
+# Changed to:
+# if(!all(dn[[1]] == fData$primerid)) stop('Order of `exprsArray` and `fData` doesn\'t match')
+st.seurat <- Giotto2Seurat(testcombo)
+source("script/utils/findMarkersEachCell.r")
+# Question: Should sample/treatment be added to latent.vars? It is not added here, but it seems to be added on the single-cell side.
+# The following function has been updated and should be re-run.
+# Different filtering thresholds can be used.
+# output: 001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_0.2.csv
+for (log2fc in seq(0, 1, 0.05)){
+  findMarkersEachCell(obj=st.seurat, group_col="treatment", cellType_col="cell_types",
+                    pairs=pairs, outdir="001Giotto_out/003DEGs", exclude="C12",
+                    test.use="wilcox", log2fc_cutoff=log2fc)
+}
+# Do not filter using log2fc, output in one-row-one-gene format. This format is easier to filter.
+meta <- pDataDT(testcombo)
+brain_regions <- unique(meta$cell_types)
+brain_regions <- setdiff(brain_regions, "C12")
+st.DEGs <- list()
+n <- 1
+for (x in brain_regions) {
+  for (y in c("FADCtrl_vs_WTCtrl", "PLX5622_vs_FADCtrl", "PLX5622_vs_WTCtrl")){
+    df <- read.csv(paste0("001Giotto_out/003DEGs/wilcox/", x, ".", y, ".csv"),
+                 row.names=1)
+    df <- df[df$p_val_adj < 0.05, ]
+    df$brain_region <- x
+    df$comparison <- y
+    df$gene <- row.names(df)
+    st.DEGs[[n]] <- df
+    n <- n + 1
+  }
+}
+st.DEGs <- do.call(rbind, st.DEGs)
+write.csv(st.DEGs, "001Giotto_out/003DEGs/wilcox/st.DEGs.csv")
+# Giotto::findScranMarkers
+dir.create("001Giotto_out/003DEGs/wilcox.Giotto")
+dir.create("001Giotto_out/003DEGs/t.Giotto")
+# Compare between samples in the same BRAIN REGION.
+S.column <- pDataDT(testcombo)$treatment
+CT.column <- pDataDT(testcombo)$cell_types
+testcombo@cell_metadata$cell$rna@metaDT$treatment_CT <- paste(S.column, CT.column, sep="_")
+for(test_type in c("t", "wilcox")){
+  if (test_type == "wilcox") next
+  for (pair in pairs){
+    for (C in unique(CT.column)){
+      # C12 only exists in one sample and cannot be used for differential expression analysis, so it needs to be excluded.
+      if (C == "C12") next
+      S1 <- pair[1]
+      S2 <- pair[2]
+      scran_markers = findScranMarkers(gobject = testcombo,
+                                   cluster_column = 'treatment_CT',
+                                   group_1 = paste(S1, C, sep = "_"),
+                                   group_2 = paste(S2, C, sep = "_"),
+                                   test.type=test_type)
+      # BUG in findScranMarkers: This function does not always find markers of group1.
+      # It sometimes finds markers of group2. Which one is used depends on the order() function.
+      out.df <- scran_markers[[1]]
+      if (! all(out.df$cluster == paste(S1, C, sep = "_"))){
+        out.df <- scran_markers[[2]]
+      }
+      out.base <- paste0(S1, "_vs_", S2, ".", C, ".csv")
+      write.csv(out.df, paste0("001Giotto_out/003DEGs/", test_type, ".Giotto/", out.base))
+    }
+  }
+}
+# Organize the data.
+# The wilcox method does not output summary.logFC, but outputs summary.AUC instead.
+header <- c("method", "cellType", "comparison",
+            "direction", "numOfGene", "geneList")
+for (log2fc in c(0.2, 0.5, 1)){
+  c.list <- as.list(1:length(header)) # Used to collect results. One item per column.
+  names(c.list) <- header
+  n = 1
+  for (pair in pairs){
+    for (C in unique(CT.column)){
+      # C12 only exists in one sample and cannot be used for differential expression analysis, so it needs to be excluded.
+      if (C == "C12") next
+      S1 <- pair[1]
+      S2 <- pair[2]
+      out.df.combined <- list()
+      out.base <- paste0(S1, "_vs_", S2, ".", C, ".csv")
+      out.df <- read.csv(file.path("001Giotto_out/003DEGs/wilcox.Giotto", out.base), row.names=1)
+      out.df.combined[["up"]] <- subset(out.df, FDR < 0.05 & summary.logFC > lfc.cutoff)
+      out.df.combined[["down"]] <- subset(out.df, FDR < 0.05 & summary.logFC < -lfc.cutoff)
+      for (direct in c("up", "down")){
+        tmp.df <- out.df.combined[[direct]]
+        write.csv(tmp.df, paste0(out.dir, "C_", C, "__", S1,
+                                           "_vs_", S2, ".", direct, ".csv"))
+        DEGs <- tmp.df$feats
+        c.list[["method"]][n] <- "Giotto.wilcox"
+        c.list[["cellType"]][n] <- C
+        c.list[["comparison"]][n] <- paste0(S1, "_vs_", S2)
+        c.list[["direction"]][n] <- direct
+        c.list[["numOfGene"]][n] <- length(DEGs)
+        c.list[["geneList"]][n] <- paste(DEGs, collapse = ";")
+        n = n + 1
+      }
+    }
+  }
+  out.combined <- data.frame(c.list)
+  out.path <- paste0("001Giotto_out/003DEGs/wilcox.Giotto/wilcox.each_region.log2fc_",
+                     log2fc, ".csv")
+  write.csv(out.combined, out.path)
+}
+# Investigate the consistency between Giotto and Seurat wilcox methods.
+library(ggplot2)
+DEGs.seurat <- read.csv("001Giotto_out/003DEGs/wilcox/Olfactory area.PLX5622_vs_FADCtrl.csv", row.names=1)
+DEGs.giotto <- read.csv("001Giotto_out/003DEGs/wilcox.Giotto/PLX5622_vs_FADCtrl.Olfactory area.csv", row.names=1)
+intersect(row.names(DEGs.seurat[1:100, ]), head(DEGs.giotto$feats, 100)) # 100 genes, completely identical.
+# Therefore, the wilcox method of Giotto and Seurat should be the same, except that Seurat seems to have performed some post-processing on the scran results.
+```
+
+## DEGs Identification: MAST
+```{r}
+pairs <- list()
+pairs[[1]] <- c("PLX5622", "FADCtrl")
+pairs[[2]] <- c("FADCtrl", "WTCtrl")
+pairs[[3]] <- c("PLX5622", "WTCtrl")
+#
+# S.column <- pDataDT(testcombo)$treatment
+# CT.column <- pDataDT(testcombo)$cell_types
+# testcombo@cell_metadata$cell$rna@metaDT$treatment_CT <- paste(S.column, CT.column, sep="_")
+#
+# for (pair in pairs){
+# for (C in unique(CT.column)){
+# # C12 only exists in one sample and cannot be used for differential expression analysis, so it needs to be excluded.
+# if (C == "C12") next
+# pair <- pairs[[1]]
+# C <- "Isocortex"
+# S1 <- pair[1]
+# S2 <- pair[2]
+# markers = findMastMarkers(gobject = testcombo,
+# cluster_column = 'treatment_CT',
+# group_1 = paste(S1, C, sep = "_"),
+# group_2 = paste(S2, C, sep = "_"),
+# adjust_columns="batch")
+# # Error: Error in MAST::FromMatrix(exprsArray = expr_data, cData = column_data, :
+# # `exprsArray` must be matrix, 3-D array, `list` or `SimpleList`
+# out.base <- paste0(S1, "_vs_", S2, ".", C, ".csv")
+# write.csv(out.df, paste0("001Giotto_out/003DEGs/", test_type, ".Giotto/", out.base))
+# }
+# }
+Giotto2Seurat <- function(obj){
+  library(Seurat)
+  expr <- get_expression_values(testcombo)@exprMat
+  meta <- as.data.frame(pDataDT(testcombo))
+  row.names(meta) <- meta$cell_ID
+  obj.seurat <- CreateSeuratObject(counts=expr, meta.data=meta)
+  obj.seurat <- NormalizeData(obj.seurat)
+  return(obj.seurat)
+}
+# bug: MAST:::checkAssayNames line 131
+# if(!isTRUE(all.equal(dn[[1]], fData$primerid))) stop('Order of `exprsArray` and `fData` doesn\'t match')
+# Changed to:
+# if(!all(dn[[1]] == fData$primerid)) stop('Order of `exprsArray` and `fData` doesn\'t match')
+st.seurat <- Giotto2Seurat(testcombo)
+source("script/utils/findMarkersEachCell.r")
+# Question: Should sample/treatment be added to latent.vars? It is not added here, but it seems to be added on the single-cell side.
+# The following function has been updated and should be re-run.
+# Different filtering thresholds can be used.
+# output: 001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_0.2.csv
+for (log2fc in seq(0, 1, 0.05)){
+  log2fc <- 0
+  findMarkersEachCell(obj=st.seurat, group_col="treatment", cellType_col="cell_types",
+                    pairs=pairs, outdir="001Giotto_out/003DEGs", exclude="C12",
+                    test.use="MAST", latent.vars="batch", log2fc_cutoff=log2fc)
+}
+deg.list <- list()
+n <- 1
+for (pair in pairs){
+  for (C in unique(CT.column)){
+    # C12 only exists in one sample and cannot be used for differential expression analysis, so it needs to be excluded.
+    if (C == "C12") next
+    S1 <- pair[1]
+    S2 <- pair[2]
+    df <- read.csv(paste0("001Giotto_out/003DEGs/MAST/", C, ".", S1, "_vs_", S2, ".csv"), row.names=1)
+    df$brain_region <- C
+    df$comparison <- paste0(S1, "_vs_", S2)
+    df$gene <- row.names(df)
+    deg.list[[n]] <- df
+    n <- n + 1
+  }
+}
+deg.df <- Reduce(rbind, deg.list)
+deg.df <- subset(deg.df, p_val_adj < 0.05)
+write.csv(deg.df, "001Giotto_out/003DEGs/MAST/st.DEGs.mast.csv")
+```
+
+### Investigation of Batch Effect Genes (EDA)
+```{r}
+meta <- data.frame(testcombo@cell_metadata$cell$rna@metaDT)
+row.names(meta) <- meta$cell_ID
+gobj.count <- CreateSeuratObject(testcombo@expression$cell$rna$raw@exprMat,
+                              meta.data=meta)
+sce <- as.SingleCellExperiment(gobj.count)
+summed <- scuttle::aggregateAcrossCells(sce,
+             id=colData(sce)[,"list_ID"])
+dds <- DESeqDataSet(summed, ~ treatment + batch)
+dds <- DESeq(dds)
+resultsNames(dds)
+res <- results(dds, name = "batch_2_vs_1")
+res <- data.frame(res)
+res <- na.omit(res)
+res <- res[res$padj < 0.05, ]
+res <- res[order(res$pvalue), ]
+nrow(res)
+# [1] 670
+res <- results(dds, name = "treatment_PLX5622_vs_FADCtrl")
+res <- data.frame(res)
+res <- na.omit(res)
+res <- res[res$padj < 0.05, ]
+res <- res[order(res$pvalue), ]
+nrow(res) # 101
+res <- results(dds, name = "treatment_WTCtrl_vs_FADCtrl")
+res <- data.frame(res)
+res <- na.omit(res)
+res <- res[res$padj < 0.05, ]
+res <- res[order(res$pvalue), ]
+nrow(res) # 210
+# https://personal.broadinstitute.org/scalvo/MitoCarta3.0/mouse.mitocarta3.0.html
+# http://ribosome.med.miyazaki-u.ac.jp/rpg.cgi?mode=orglist&org=Mus%20musculus
+```
+
+### Removal of Ribosomal and Mitochondrial Genes (EDA)
+```{r}
+library(readxl)
+ribo <- read_excel("000data/ribosome.xlsx")
+mito <- read_excel("000data/Mouse.MitoCarta3.0.xls")
+ribo.gene <- intersect(ribo$gene, row.names(summed))
+mito.gene <- intersect(mito$Symbol, row.names(summed))
+total.count <- sum(assay(summed))
+summed.ribo <- summed[ribo.gene, ]
+ribo.count <- sum(assay(summed.ribo))
+ribo.count / total.count
+# [1] 0.07582495
+summed.mito <- summed[mito.gene, ]
+mito.count <- sum(assay(summed.mito))
+mito.count / total.count
+# 0.2492999
+summed.sub <- summed[!row.names(summed) %in% c(ribo.gene, mito.gene), ]
+dds <- DESeqDataSet(summed.sub, ~ treatment + batch)
+dds <- DESeq(dds)
+res <- results(dds, name = "treatment_PLX5622_vs_FADCtrl")
+res <- data.frame(res)
+res <- na.omit(res)
+res <- res[res$padj < 0.05, ]
+res <- res[order(res$pvalue), ]
+nrow(res)
+# 98, did not increase but decreased instead.
+setdiff(row.names(res), st.DEGs$gene)
+# [1] "Crybb1" "Slc2a5" "Stab1" "Ccl9" "Bin2" "Cd33"
+# [7] "Fcgr1" "Alox5ap" "Tnfaip8l2" "Fermt3" "Havcr2" "Ang"
+# [13] "Lcp1" "Slc13a3" "Phyhd1" "Spi1"
+normalized.count <- counts(dds, normalized=T)
+normalized.count["Ripk1", ]
+# FADCtrl_1 FADCtrl_2 PLX5622_1 PLX5622_2 WTCtrl_1 WTCtrl_2
+# 182.5153 188.6071 191.3566 152.5518 203.0862 141.0651
+```
+
+#---
+## Spot DEGs Statistics
+### Statistics of DEGs by Brain Region
+```{r}
+st.DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+st.DEGs.agg <- aggregate(gene~brain_region+comparison, FUN=length, data=st.DEGs)
+st.DEGs.agg <- st.DEGs.agg[order(st.DEGs.agg$comparison, st.DEGs.agg$gene), ]
+write.csv(st.DEGs.agg, "001Giotto_out/003DEGs/wilcox/st.DEGs.agg.csv")
+```
+
+### Comparison of Several DEGs Identification Methods
+```{r}
+st.DEGs.wilcox <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+st.DEGs.mast <- read.csv("001Giotto_out/003DEGs/MAST/st.DEGs.mast.csv", row.names=1)
+st.DEGs.deseq <- read.csv("001Giotto_out/003DEGs/DESeq/st.DEGs.deseq.csv", row.names=1)
+a <- subset(st.DEGs.wilcox, brain_region == "Hippocampus" & comparison == "PLX5622_vs_FADCtrl" & avg_log2FC > 0, select="gene", drop=T)
+b <- subset(st.DEGs.mast, brain_region == "Hippocampus" & comparison == "PLX5622_vs_FADCtrl" & avg_log2FC > 0, select="gene", drop=T)
+c <- subset(st.DEGs.deseq, brain_region == "Hippocampus" & log2FoldChange > 0, select="gene", drop=T)
+a <- subset(st.DEGs.wilcox, select="gene", drop=T)
+b <- subset(st.DEGs.mast, select="gene", drop=T)
+c <- subset(st.DEGs.deseq, select="gene", drop=T)
+length(intersect(a, b))
+# [1] 2380
+length(intersect(a, c))
+# [1] 60
+length(intersect(b, c))
+# [1] 60
+length(Reduce(intersect, list(a, b, c))) # 60
+# library(VennDiagram)
+# inter <- get.venn.partitions(list(a=a, b=b, c=c))
+#
+# sum(inter$..count..)
+#
+# # 1. Display Venn diagrams of DEGs identified in 12 brain regions separately.
+# # 2. Display the percentage of each combination of elements relative to the total elements for DEGs identified in 12 brain regions.
+# # 3. Display the Venn diagram of all DEGs.
+# # 4. Display the Upset plot of all DEGs.
+#
+# png("001Giotto_out/003DEGs/testmin.png", width=2000, height=1800)
+# par(mfrow=c(4,3))
+# # or: grid.layout(ncol = 2,nrow = 3)
+#
+# for (i in unique(st.DEGs.wilcox$brain_region)) {
+# a <- subset(st.DEGs.wilcox, brain_region == i & comparison == "PLX5622_vs_FADCtrl", select="gene", drop=T)
+# b <- subset(st.DEGs.mast, brain_region == i & comparison == "PLX5622_vs_FADCtrl", select="gene", drop=T)
+# c <- subset(st.DEGs.deseq, brain_region == i, select="gene", drop=T)
+# p <- venn.diagram(x = list(wilcox=a, MAST=b, DEseq2=c), main = i, filename=NULL, output=T)
+# grid.draw(p)
+# }
+#
+# dev.off()
+# # Failed, all images overlapped.
+library(ggvenn)
+library(ggplot2)
+library(patchwork)
+p.list <- list()
+n <- 1
+for (i in unique(st.DEGs.wilcox$brain_region)) {
+  a <- subset(st.DEGs.wilcox, brain_region == i & comparison == "PLX5622_vs_FADCtrl", select="gene", drop=T)
+  b <- subset(st.DEGs.mast, brain_region == i & comparison == "PLX5622_vs_FADCtrl", select="gene", drop=T)
+  c <- subset(st.DEGs.deseq, brain_region == i, select="gene", drop=T)
+  p <- ggvenn(list(wilcox=a, MAST=b, DEseq2=c))
+  p <- p + labs(title=i) +
+    theme(text = element_text(family="Arial"),
+          plot.title = element_text(hjust = 0.5, size=16))
+  p.list[[n]] <- p
+  n <- n + 1
+}
+pall <- wrap_plots(p.list, ncol = 4)
+ggsave("001Giotto_out/003DEGs/testmin.jpg", pall, width=20, height=15)
+# 1. Label each small plot with the corresponding brain region in the title.
+# 2. Enlarge the image so that the middle part is visible.
+# 3. Use Arial font.
+```
+
+**Statistics of DEGs Identification Results:**
+```{r nDEGsStatistics, eval=FALSE}
+# Statistics of DEGs identification results.
+# You can plot a line graph of the total number of DEGs identified under different log2fc thresholds to determine if there is an "inflection point".
+# Is there a "gold standard" for single-cell log2fc? Answer: No.
+nDEGs.vector <- c()
+n <- 1
+for (log2fc in seq(0, 1, 0.05)){
+  file.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                      log2fc, ".csv")
+  DEGs.df <- read.csv(file.name, row.names=1)
+  total.DEGs <- length(unique(unlist(strsplit(DEGs.df$geneList, ";"))))
+  nDEGs.vector[n] <- total.DEGs
+  n <- n + 1
+}
+png("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.nDEGs_tilde_log2fc.png")
+plot(seq(0, 1, 0.05), nDEGs.vector, xlab = "log2fc", ylab="number of DEGs")
+dev.off()
+# It can be seen that the inflection point is around 0.3. If you want to set three thresholds (high, medium, low), it is more appropriate to set them at 0.2, 0.3, and 0.4.
+# Default threshold of Seurat::FindMarkers: log2fc = 0.25; min.pct = 0.1
+for (log2fc in c(0.2, 0.3, 0.4)){
+  file.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                      log2fc, ".csv")
+  DEGs.df <- read.csv(file.name, row.names=1)
+  # Compare the number of genes identified across different brain regions and comparison combinations
+  p <- ggplot(DEGs.df, aes(direction, numOfGene, fill=direction)) +
+    geom_bar(stat="identity", position="dodge") +
+    facet_grid(comparison~cellType) +
+    scale_fill_manual(values = c(up="red", down="blue")) +
+    theme(title = element_text(size = 10, face = "bold"),
+          strip.text = element_text(size=10, face="bold"),
+          axis.text.x = element_blank())
+  out.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                     log2fc, ".nDEGs.png")
+  ggsave(out.name, p, width=14, height=10)
+}
+# Describe which factors nDEGs is related to. nDEGs can to some extent represent which brain region is more affected.
+# However, it is not necessarily the case. nDEGs may also be related to the number of spots in the brain region.
+log2fc <- 0.3
+file.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                      log2fc, ".csv")
+DEGs.df <- read.csv(file.name, row.names=1)
+# The smaller the AIC, the better the model
+m <- glm(numOfGene~cellType + comparison + direction +
+           cellType:comparison +
+           cellType:direction +
+           direction:comparison,
+         data=DEGs.df)
+summary(m) # AIC=531.08
+m1 <- glm(numOfGene~cellType + comparison + direction +
+           cellType:comparison +
+           cellType:direction +
+           direction:comparison,
+         data=DEGs.df, family = poisson())
+summary(m1) # AIC=474.27
+m1.5 <- glm(numOfGene~cellType + comparison + direction +
+           cellType:comparison +
+           cellType:direction +
+           direction:comparison + cellType:comparison:direction,
+         data=DEGs.df, family = poisson())
+summary(m1.5) # AIC: 424.44
+m2 <- glm(numOfGene~comparison + direction, data=DEGs.df, family=poisson())
+summary(m2)# AIC=1080.6
+m3 <- glm(numOfGene~comparison + direction + comparison:direction, data=DEGs.df, family=poisson())
+summary(m3)# AIC: 901.71
+m4 <- glm(numOfGene~cellType, data=DEGs.df, family=poisson()) #
+summary(m4) # AIC: 779.25
+m5 <- glm(numOfGene~cellType+comparison, data=DEGs.df, family=poisson()) #
+summary(m5) # AIC: 765.83
+m6 <- glm(numOfGene~cellType+comparison+cellType:comparison, data=DEGs.df, family=poisson()) #
+summary(m6) # AIC: 720.87
+# A total of 371 DEGs were identified that showed differential expression between treatments in at least one brain region.
+length(unique(unlist(strsplit(DEGs.df$geneList, ";"))))
+# The average number of DEGs identified per brain region for AD_vs_WT, PL_vs_AD, and PL_vs_WT is...
+aggregate(numOfGene~comparison, FUN=mean, data=DEGs.df)
+# The brain regions with the highest number of DEGs for AD_vs_WT, PL_vs_AD, and PL_vs_WT are:...
+DEGs.agg <- aggregate(numOfGene~cellType+comparison, FUN=mean, data=DEGs.df)
+DEGs.agg[order(DEGs.agg$comparison, DEGs.agg$numOfGene), ]
+```
+
+**Similarity Analysis of DEGs Between Brain Regions:**
+Identify brain region-specific DEGs and shared DEGs, and describe them. Some brain regions have fewer DEGs. When calculating shared DEGs between brain regions, only the top three brain regions with the highest number of DEGs can be considered. To avoid the situation where some brain regions are too similar, making it difficult to identify brain region-specific DEGs, a clustering analysis can be performed between brain regions.
+
+```{r brainRegionSimilarity, eval=FALSE}
+#-----------------------#
+# Similarity of DEGs between brain regions. #
+#-----------------------#
+jaccard <- function(a, b) {
+    intersection = length(intersect(a, b))
+    union = length(a) + length(b) - intersection
+    return (intersection/union)
+}
+log2fc <- 0.3
+file.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                      log2fc, ".csv")
+DEGs.df <- read.csv(file.name, row.names=1)
+# Merge up and down regulation. Separate different contrasts.
+for (Contrast in unique(DEGs.df$comparison)){
+  # Contrast <- "PLX5622_vs_FADCtrl"
+  DEGs.df.sub <- DEGs.df[DEGs.df$comparison==Contrast, ]
+  DEGs.df.sub <- aggregate(geneList~cellType, FUN=function(x){
+    x <- x[x!=""]
+    x <- paste(x, collapse=";")
+    x <- paste(unique(strsplit(x, ";")[[1]]), collapse = ";")
+  }, data=DEGs.df.sub)
+  row.names(DEGs.df.sub) <- DEGs.df.sub$cellType
+ 
+  brain.regions <- unique(DEGs.df$cellType)
+  similarity.df <- data.frame(x=rep(brain.regions, each=length(brain.regions)),
+                              y=rep(brain.regions, length(brain.regions)))
+  similarity.df <- similarity.df[similarity.df$x!=similarity.df$y, ]
+ 
+  similarity.df$jaccard <- sapply(1:nrow(similarity.df), function(i){
+    a <- similarity.df[i, "x"]
+    b <- similarity.df[i, "y"]
+    a.genes <- strsplit(DEGs.df.sub[a, "geneList"], ";")[[1]]
+    b.genes <- strsplit(DEGs.df.sub[b, "geneList"], ";")[[1]]
+    jaccard(a.genes, b.genes)
+  })
+  library(reshape2)
+  similarity.df <- dcast(similarity.df, x ~ y)
+  similarity.df <- data.frame(similarity.df[, -1], row.names=similarity.df$x)
+  library(pheatmap)
+  png(paste0("001Giotto_out/003DEGs/wilcox/brain_region_similarity.", Contrast, ".png"), width=700, height=700)
+  pheatmap(similarity.df, fontsize=14)
+  dev.off()
+}
+# Module-specific / shared DEGs
+DEGs.df.sub <- DEGs.df.sub <- DEGs.df[DEGs.df$comparison=="PLX5622_vs_FADCtrl", ]
+DEGs.df.sub <- aggregate(geneList~cellType, FUN=function(x){
+  x <- x[x!=""]
+  paste(x, collapse=";")
+}, data=DEGs.df.sub)
+row.names(DEGs.df.sub) <- DEGs.df.sub$cellType
+brain.region_to_module <- c(rep("module1", 6), rep("module2", 2), rep("module3", 2), "module4")
+names(brain.region_to_module) <- c("Isocortex", "Third Ventricle", "Cortical subplate",
+                            "Striatum", "Hippocampus", "Meninges", "Fiber tracts", "Thalamus",
+                            "Hypothalamus", "Olfactory area", "Lateral Ventricle")
+DEGs.df.sub$module <- brain.region_to_module[DEGs.df.sub$cellType]
+DEGs.df.sub.agg <- aggregate(geneList~module, data=DEGs.df.sub, FUN=function(x){
+  x <- x[x!=""]
+  x <- paste(x, collapse=";")
+  x <- paste(unique(strsplit(x, ";")[[1]]), collapse = ";")
+})
+m1.gl <- subset(DEGs.df.sub.agg, module=="module1", select="geneList", drop=T)
+m1.gl <- strsplit(m1.gl, ";")[[1]]
+m2.gl <- subset(DEGs.df.sub.agg, module=="module2", select="geneList", drop=T)
+m2.gl <- strsplit(m2.gl, ";")[[1]]
+m3.gl <- subset(DEGs.df.sub.agg, module=="module3", select="geneList", drop=T)
+m3.gl <- strsplit(m3.gl, ";")[[1]]
+module.genes.list <- list(m1=m1.gl, m2=m2.gl, m3=m3.gl)
+out.list <- list(
+  module.inter = Reduce(intersect, module.genes.list),
+  m1.specific = setdiff(setdiff(m1.gl, m2.gl), m3.gl),
+  m2.specific = setdiff(setdiff(m2.gl, m1.gl), m3.gl),
+  m3.specific = setdiff(setdiff(m3.gl, m1.gl), m2.gl)
+)
+out.list <- sapply(out.list, paste, collapse=",")
+out.df <- data.frame(V1=names(out.list), V2=out.list)
+write.table(out.df, file = "001Giotto_out/003DEGs/wilcox/module_specific_inter.txt",
+            row.names = F, col.names = F, sep = "\t", quote = F)
+system("../script/metascape 001Giotto_out/003DEGs/wilcox/module_specific_inter.txt 001Giotto_out/003DEGs/wilcox/")
+```
+
+**Results:**
+- [data/st/003/st.DEGs.csv](data/st/003/st.DEGs.csv): DEGs table filtered only by padj < 0.05. One gene per row, including all brain regions (excluding C12).
+- [data/st/003/wilcox.each_cell.nDEGs_tilde_log2fc.png](data/st/003/wilcox.each_cell.nDEGs_tilde_log2fc.png){#wilcox-each-cell-nDEGs-tilde-log2fc-png target="_blank"}: Scatter plot of nDEG ~ log2fc, providing a basis for setting the log2fc threshold.
+- [data/st/003/wilcox.each_cell.log2fc_0.2.csv](data/st/003/wilcox.each_cell.log2fc_0.2.csv){#wilcox-each_cell-log2fc-0-2-csv}: DEGs list identified using `Seurat::FindMarkers`.
+- [data/st/003/wilcox.each_cell.log2fc_0.3.csv](data/st/003/wilcox.each_cell.log2fc_0.3.csv){#wilcox-each-cell-log2fc-0-3-csv}
+- [data/st/003/wilcox.each_cell.log2fc_0.4.csv](data/st/003/wilcox.each_cell.log2fc_0.4.csv)
+- [data/st/003/wilcox.each_cell.log2fc_0.2.nDEGs.png](data/st/003/wilcox.each_cell.log2fc_0.2.nDEGs.png){target="_blank"}: Bar plot showing the number of up/down-regulated DEGs in different brain regions and comparison combinations.
+- [data/st/003/wilcox.each_cell.log2fc_0.3.nDEGs.png](data/st/003/wilcox.each_cell.log2fc_0.3.nDEGs.png){#wilcox-each-cell-log2fc-0-3-nDEGs-png target="_blank"}
+- [data/st/003/wilcox.each_cell.log2fc_0.4.nDEGs.png](data/st/003/wilcox.each_cell.log2fc_0.4.nDEGs.png){target="_blank"}
+- [data/st/003/module_specific_inter.txt](data/st/003/module_specific_inter.txt){#module-specific-inter-txt target="_blank"}: Shared and specific DEGs for each module.
+
+```{r brainRegionSimilarity1, echo=FALSE, fig.cap="FADCtrl_vs_WTCtrl"}
+knitr::include_graphics("data/st/003/brain_region_similarity.FADCtrl_vs_WTCtrl.png")
+```
+```{r brainRegionSimilarity2, echo=FALSE, fig.cap="PLX5622_vs_FADCtrl"}
+knitr::include_graphics("data/st/003/brain_region_similarity.PLX5622_vs_FADCtrl.png")
+```
+```{r moduleSpecificInterMetascape, echo=FALSE, fig.cap="Functional enrichment analysis of shared and specific DEGs across modules."}
+knitr::include_graphics("data/st/003/module_specific_inter_metascape.png")
+```
+
+**Result Description**
+
+**Selection of log2fc threshold.** According to the scatter plot of nDEG ~ log2fc, there is an inflection point around log2fc = 0.3 ([wilcox.each_cell.nDEGs_tilde_log2fc.png](#wilcox-each-cell-nDEGs-tilde-log2fc-png)). Therefore, 0.3 was chosen as the threshold for subsequent analysis.
+
+**Differences in the number of DEGs across brain regions.** Using the wilcox method, with thresholds of log2fc=0.3, min.pct=0.1, and FDR<0.05, a total of 371 DEGs were identified that showed differential expression between treatments in at least one brain region. Drug treatment (PL_vs_AD) mainly caused downregulation. The brain regions with the most downregulated DEGs after drug treatment (PL_vs_AD) were Olfactory area, Fiber tracts, and Thalamus, while the brain regions with the most upregulated DEGs were Olfactory area, Cortical subplate, and Hypothalamus ([wilcox.each_cell.log2fc_0.3.csv](#wilcox-each-cell-log2fc-0-3-csv); [wilcox.each_cell.log2fc_0.3.nDEGs.png](#wilcox-each-cell-log2fc-0-3-nDEGs-png)).
+
+**Similarity of DEGs between brain regions.**  
+For AD_vs_WT, the DEGs similarity was high among Hippocampus, Isocortex, Thalamus, Fiber tracts, and Olfactory area (Figure \@ref(fig:brainRegionSimilarity1)). What pathways are the shared DEGs in these brain regions enriched in?  
+For PL_vs_AD, Isocortex, Third ventricle, Cortical subplate, Striatum, Hippocampus, and Meninges (module1) showed high DEGs similarity with each other. In addition, Fiber tracts and Thalamus (module2) also showed high similarity (Figure \@ref(fig:brainRegionSimilarity2)). The remaining Hypothalamus and Olfactory area were classified as module3. Describe the module-specific DEGs. The shared and specific DEGs of these 3 modules were identified and subjected to Metascape functional enrichment analysis. The results showed that the shared DEGs of the three modules were mainly enriched in pathways represented by "synapse pruning" and "microglia cell activation". Under the threshold of qvalue < 0.05 (log(qvalue) < -1.30103), neither module1 nor module2 specific DEGs were enriched in any pathways. Module3 was enriched in pathways represented by "synaptic vesicle cycle" ([module_specific_inter.txt](#module-specific-inter-txt); Figure \@ref(fig:moduleSpecificInterMetascape)).
+
+### Rescued genes: lfc 0.3
+- Identify rescued genes and describe them. Number of DEGs in different brain regions?
+- The rescued DEGs table can undergo the same downstream analyses as the original DEGs table: functional enrichment analysis, investigation of genes of interest.
+
+```{r eval=FALSE}
+# Original script: script/003identify_DEGs.filter_DEGs.r
+source("script/utils/filter_DEGs.r") # Load the get_rescued method.
+# get rescued genes.
+log2fc <- 0.3
+file.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                      log2fc, ".csv")
+DEGs.df <- read.csv(file.name, row.names=1)
+DEGs.rescued <- get_rescued(DEGs.df)
+file.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                      log2fc, ".rescued.csv")
+write.csv(DEGs.rescued, file.name)
+p <- ggplot(DEGs.rescued, aes(direction, numOfGene, fill=direction)) +
+  geom_bar(stat="identity", position="dodge") +
+  facet_grid(.~cellType) +
+  scale_fill_manual(values = c(up="red", down="blue")) +
+  theme(title = element_text(size = 10, face = "bold"),
+        strip.text = element_text(size=10, face="bold"),
+        axis.text.x = element_blank())
+out.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                   log2fc, ".rescued.nDEGs.png")
+ggsave(out.name, p, width=14, height=3)
+```
+
+### Rescued genes: lfc 0
+```{r}
+#-----------------------------------------------------------------------------
+# Do not set log2fc threshold
+# source("script/utils/filter_DEGs.r") # This method is designed based on the one-row-multiple-genes format.
+st.DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+# Method 1: Subset first, then merge.
+# Merge the two comparison combination tables based on gene, brain region, and comparison, then screen for genes with opposite log2FC directions.
+df1 <- subset(st.DEGs, comparison == "PLX5622_vs_FADCtrl", select=c("gene", "brain_region", "avg_log2FC"))
+df2 <- subset(st.DEGs, comparison == "FADCtrl_vs_WTCtrl", select=c("gene", "brain_region", "avg_log2FC"))
+colnames(df1) <- sub("avg_log2FC", "log2FC.PL_vs_AD", colnames(df1))
+colnames(df2) <- sub("avg_log2FC", "log2FC.AD_vs_WT", colnames(df2))
+df.merged <- merge(df1, df2, by=c("gene", "brain_region"))
+df.rescued <- subset(df.merged, df.merged$log2FC.PL_vs_AD * df.merged$log2FC.AD_vs_WT < 0)
+df.rescued.up <- subset(df.rescued, log2FC.PL_vs_AD > 0)
+writeLines(df.rescued.up$gene, "001Giotto_out/003DEGs/wilcox/st.DEGs.up_rescued.list")
+file.name <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                      log2fc, ".rescued.csv")
+write.csv(DEGs.rescued, file.name)
+# Method 2: Use dcast directly, which is more concise.
+st.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+st.DEGs.sub <- subset(st.DEGs, comparison != "PLX5622_vs_WTCtrl")
+st.DEGs.wide <- dcast(gene+brain_region~comparison, value.var = "avg_log2FC", data=st.DEGs.sub)
+st.DEGs.wide <- na.omit(st.DEGs.wide)
+st.DEGs.wide <- subset(st.DEGs.wide, PLX5622_vs_FADCtrl*FADCtrl_vs_WTCtrl < 0) # Genes with opposite change directions in the two comparison combinations.
+st.DEGs.wide$direction <- ifelse(st.DEGs.wide$PLX5622_vs_FADCtrl > 0, "up rescued", "down rescued")
+write.csv(st.DEGs.wide, "../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.rescued.csv")
+length(unique(st.DEGs.wide$gene))
+# [1] 305
+```
+
+**Results:**
+- [data/st/003/wilcox.each_cell.log2fc_0.3.rescued.csv](data/st/003/wilcox.each_cell.log2fc_0.3.rescued.csv): Rescued DEGs table.
+- [data/st/003/wilcox.each_cell.log2fc_0.3.rescued.nDEGs.png](data/st/003/wilcox.each_cell.log2fc_0.3.rescued.nDEGs.png){target="_blank"}: Comparison plot of the number of rescued DEGs across different brain regions.
+
+#---
+## Spot DEGs Classification Discussion: By Cell Type
+### Gene Filtering
+Term definitions:
+- microglia enriched: Level 1 microglia marker genes.
+- microglia specific: Genes that belong to microglia enriched genes but do not belong to enriched genes of other cell types.
+
+#### micro enriched
+Using Level 1 microglia markers
+```{r}
+# Load spot DEGs
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+head(spot.DEGs)
+# p_val avg_log2FC pct.1 pct.2 p_val_adj brain_region comparison gene
+# Thy1 0.000000e+00 2.2648989 0.999 0.996 0.000000e+00 Isocortex FADCtrl_vs_WTCtrl Thy1
+# Gfap 1.040859e-252 1.1939180 0.854 0.268 1.930897e-248 Isocortex FADCtrl_vs_WTCtrl Gfap
+# Ctsd 8.787947e-158 0.9353749 0.996 0.994 1.630252e-153 Isocortex FADCtrl_vs_WTCtrl Ctsd
+# Tyrobp 2.050541e-145 0.9585237 0.840 0.508 3.803959e-141 Isocortex FADCtrl_vs_WTCtrl Tyrobp
+# Cst7 7.212608e-136 0.4824200 0.379 0.003 1.338011e-131 Isocortex FADCtrl_vs_WTCtrl Cst7
+# B2m 3.464400e-131 0.6965407 0.976 0.917 6.426808e-127 Isocortex FADCtrl_vs_WTCtrl B2m
+# Load Level 1 marker genes.
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+head(cell.DEGs)
+# p_val avg_log2FC pct.1 pct.2 p_val_adj cluster gene
+# St18 0 2.026990 0.965 0.180 0 Oligo St18
+# Mbp 0 2.001661 0.992 0.387 0 Oligo Mbp
+# Prr5l 0 1.964242 0.941 0.114 0 Oligo Prr5l
+# Neat1 0 1.845240 0.923 0.211 0 Oligo Neat1
+# Mobp 0 1.800589 0.893 0.140 0 Oligo Mobp
+# Mag 0 1.624231 0.860 0.156 0 Oligo Mag
+# Calculate the number of micro specific ST DEGs and fill in the section mentioned by Teacher Ming today.
+nrow(spot.DEGs) == nrow(subset(spot.DEGs, p_val_adj < 0.05)) # TRUE
+spot.DEGs.sub <- subset(spot.DEGs, comparison == "PLX5622_vs_FADCtrl")
+cell.DEGs.sub <- subset(cell.DEGs, cluster == "Micro")
+length(unique(spot.DEGs.sub$gene))
+length(intersect(spot.DEGs.sub$gene, cell.DEGs.sub$gene))
+# 120
+# We observed that 120 of PLX5622-responsive genes were enriched in microglia
+spot.DEGs.sub.micro <- subset(spot.DEGs.sub, gene %in% cell.DEGs.sub$gene)
+subset(spot.DEGs.sub.micro, avg_log2FC > 0)
+# p_val avg_log2FC pct.1 pct.2 p_val_adj brain_region comparison gene
+# Gm424181 6.272133e-18 0.3068101 0.998 0.996 1.163543e-13 Hypothalamus PLX5622_vs_FADCtrl Gm42418
+# Apoe2 8.322432e-09 0.1322606 0.998 0.998 1.543894e-04 Hypothalamus PLX5622_vs_FADCtrl Apoe
+# Gm424182 3.172949e-09 0.2123767 1.000 1.000 5.886137e-05 Cortical subplate PLX5622_vs_FADCtrl Gm42418
+# Gm424185 1.578519e-14 0.2395111 1.000 1.000 2.928311e-10 Thalamus PLX5622_vs_FADCtrl Gm42418
+# Gm424186 6.455716e-60 0.7325213 1.000 1.000 1.197600e-55 Olfactory area PLX5622_vs_FADCtrl Gm42418
+# Apoe11 3.932276e-09 0.1616117 1.000 1.000 7.294765e-05 Olfactory area PLX5622_vs_FADCtrl Apoe
+# Tsc22d4 1.129232e-06 0.1407847 0.897 0.840 2.094839e-02 Olfactory area PLX5622_vs_FADCtrl Tsc22d4
+# Upregulated genes include: Apoe, Gm42418, Tsc22d4
+down <- subset(spot.DEGs.sub.micro, spot.DEGs.sub.micro$avg_log2FC < 0)
+up <- subset(spot.DEGs.sub.micro, spot.DEGs.sub.micro$avg_log2FC > 0)
+intersect(down$gene, up$gene) # 0
+length(unique(down$gene)) / length(unique(spot.DEGs.sub.micro$gene))
+# [1] 0.975
+# and 97.5% of them were downregulated
+a <- subset(spot.DEGs.sub.micro, brain_region %in% c("Thalamus", "Olfactory area"))
+length(unique(a$gene )) / length(unique(spot.DEGs.sub.micro$gene))
+# 0.9666667
+# 92.7% of the microglial-specific PLX5622-responsive genes were located in the two brain regions with the highest Aβ burden—the olfactory cortical area and thalamus
+# Draw heatmap of micro specific ST DEGs.
+# Draw heatmap of Astro specific ST DEGs.
+# Use MitoCarta3.0 instead of genes in the "GO: oxidative phosphorylation pathway" for re-analysis.
+# Existing issue: Microglia markers may need to remove genes that are also highly expressed in other cell types.
+```
+
+#### micro specific
+Belong to Level 1 microglia marker & do not belong to other cell markers
+```{r}
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+spot.DEGs.sub <- subset(spot.DEGs, comparison == "PLX5622_vs_FADCtrl")
+df1 <- subset(cell.DEGs, cluster == "Micro")
+df2 <- subset(cell.DEGs, cluster != "Micro")
+micro.specific <- setdiff(df1$gene, df2$gene)
+length(micro.specific) # 557
+spot.DEGs.micro <- subset(spot.DEGs.sub, gene %in% micro.specific)
+intersect(micro.specific, c("Apoe", "Gm42418", "Tsc22d4")) # character(0)
+X <- length(unique(spot.DEGs.micro$gene)) # 103
+down <- subset(spot.DEGs.micro, spot.DEGs.micro$avg_log2FC < 0)
+Y <- length(unique(down$gene))*100 / length(unique(spot.DEGs.micro$gene)) # 1
+a <- subset(spot.DEGs.micro, brain_region %in% c("Thalamus", "Olfactory area"))
+Z <- length(unique(a$gene))*100 / length(unique(spot.DEGs.micro$gene)) # 0.961165
+out <- paste0("We observed that ", X, " of PLX5622-responsive genes were enriched in microglia, and ", Y, "% of them were downregulated (Fig. Ext. 4e). ", round(Z, 1), "% of the microglial-specific PLX5622-responsive genes were located in the two brain regions with the highest Aβ burden—the olfactory cortical area and thalamus")
+print(out)
+```
+
+#### astro enriched
+```{r}
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+spot.DEGs.sub <- subset(spot.DEGs, comparison == "PLX5622_vs_FADCtrl")
+ct <- "Astro"
+ct.enriched <- subset(cell.DEGs, cluster == ct)
+spot.DEGs.ct <- subset(spot.DEGs.sub, gene %in% ct.enriched$gene)
+length(unique(spot.DEGs.ct$gene)) # 61
+ct.enriched2 <- subset(ct.enriched, abs(avg_log2FC) > 0.4)
+spot.DEGs.ct2 <- subset(spot.DEGs.sub, gene %in% ct.enriched2$gene)
+length(unique(spot.DEGs.ct2$gene)) # 43
+# Pathway enrichment analysis.
+spot.DEGs.ct2.up <- unique(subset(spot.DEGs.ct2, avg_log2FC > 0)$gene)
+spot.DEGs.ct2.down <- unique(subset(spot.DEGs.ct2, avg_log2FC < 0)$gene)
+writeLines(c(paste0("up\t",paste(spot.DEGs.ct2.up, collapse=",")),
+           paste0("down\t",paste(spot.DEGs.ct2.down, collapse=","))),
+           "../001ST/001Giotto_out/003DEGs/wilcox/Astro_enriched.txt")
+```
+
+#### astro specific
+Belong to Level 1 astrocyte marker & do not belong to other cell markers
+```{r}
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+spot.DEGs.sub <- subset(spot.DEGs, comparison == "PLX5622_vs_FADCtrl")
+ct <- "Astro"
+df1 <- subset(cell.DEGs, cluster == ct)
+df2 <- subset(cell.DEGs, cluster != ct)
+ct.specific <- setdiff(df1$gene, df2$gene)
+length(ct.specific) # 557
+spot.DEGs.ct <- subset(spot.DEGs.sub, gene %in% ct.specific)
+# intersect(micro.specific, c("Apoe", "Gm42418", "Tsc22d4")) # character(0)
+X <- length(unique(spot.DEGs.ct$gene)) # 103
+down <- subset(spot.DEGs.ct, spot.DEGs.ct$avg_log2FC < 0)
+Y <- length(unique(down$gene))*100 / length(unique(spot.DEGs.ct$gene)) # 1
+a <- subset(spot.DEGs.ct, brain_region %in% c("Thalamus", "Olfactory area"))
+Z <- length(unique(a$gene))*100 / length(unique(spot.DEGs.ct$gene)) # 0.961165
+out <- paste0("We observed that ", round(X, 1), " of PLX5622-responsive genes were enriched in ", ct, ", and ", round(Y, 1), "% of them were downregulated (Fig. Ext. 4e). ", round(Z, 1), "% of the ", ct, "-specific PLX5622-responsive genes were located in the two brain regions with the highest Aβ burden—the olfactory cortical area and thalamus")
+print(out)
+# Pathway enrichment analysis.
+spot.DEGs.ct.up <- unique(subset(spot.DEGs.ct, avg_log2FC > 0)$gene)
+spot.DEGs.ct.down <- unique(subset(spot.DEGs.ct, avg_log2FC < 0)$gene)
+writeLines(c(paste0("up\t",paste(spot.DEGs.ct.up, collapse=",")),
+           paste0("down\t",paste(spot.DEGs.ct.down, collapse=","))),
+           "../001ST/001Giotto_out/003DEGs/wilcox/Astro_specific.txt")
+```
+```
+"We observed that 28 of PLX5622-responsive genes were enriched in Astro, and 46.4% of them were downregulated (Fig. Ext. 4e). 82.1% of the Astro-specific PLX5622-responsive genes were located in the two brain regions with the highest Aβ burden—the olfactory cortical area and thalamus"
+```
+
+#### Glu specific
+Belong to Level 1 Glu marker & do not belong to other cell markers
+```{r}
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+spot.DEGs.sub <- subset(spot.DEGs, comparison == "PLX5622_vs_FADCtrl")
+ct <- "Glu"
+df1 <- subset(cell.DEGs, cluster == ct)
+df2 <- subset(cell.DEGs, cluster != ct)
+ct.specific <- setdiff(df1$gene, df2$gene)
+length(ct.specific)
+spot.DEGs.ct <- subset(spot.DEGs.sub, gene %in% ct.specific)
+X <- length(unique(spot.DEGs.ct$gene))
+down <- subset(spot.DEGs.ct, spot.DEGs.ct$avg_log2FC < 0)
+Y <- length(unique(down$gene))*100 / length(unique(spot.DEGs.ct$gene))
+a <- subset(spot.DEGs.ct, brain_region %in% c("Thalamus", "Olfactory area"))
+Z <- length(unique(a$gene))*100 / length(unique(spot.DEGs.ct$gene))
+out <- paste0("We observed that ", round(X, 1), " of PLX5622-responsive genes were enriched in ", ct, ", and ", round(Y, 1), "% of them were downregulated (Fig. Ext. 4e). ", round(Z, 1), "% of the ", ct, "-specific PLX5622-responsive genes were located in the two brain regions with the highest Aβ burden—the olfactory cortical area and thalamus")
+print(out)
+# Pathway enrichment analysis.
+spot.DEGs.ct.up <- unique(subset(spot.DEGs.ct, avg_log2FC > 0)$gene)
+spot.DEGs.ct.down <- unique(subset(spot.DEGs.ct, avg_log2FC < 0)$gene)
+writeLines(c(paste0("up\t",paste(spot.DEGs.ct.up, collapse=",")),
+           paste0("down\t",paste(spot.DEGs.ct.down, collapse=","))),
+           paste0("../001ST/001Giotto_out/003DEGs/wilcox/", ct, "_specific.txt"))
+```
+
+#### Oligo enriched
+```{r}
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+spot.DEGs.sub <- subset(spot.DEGs, comparison == "PLX5622_vs_FADCtrl")
+ct <- "Oligo"
+ct.enriched <- subset(cell.DEGs, cluster == ct)
+spot.DEGs.ct <- subset(spot.DEGs.sub, gene %in% ct.enriched$gene)
+length(unique(spot.DEGs.ct$gene)) # 49
+App.cutoff <- abs(subset(ct.enriched, gene == "App")$avg_log2FC) # 0.3801595
+ct.enriched2 <- subset(ct.enriched, abs(avg_log2FC) > 0.4)
+spot.DEGs.ct2 <- subset(spot.DEGs.sub, gene %in% ct.enriched2$gene)
+length(unique(spot.DEGs.ct2$gene)) # 30
+# Pathway enrichment analysis.
+# PL vs AD up, down.
+spot.DEGs.ct2.up <- unique(subset(spot.DEGs.ct2, avg_log2FC > 0)$gene)
+spot.DEGs.ct2.down <- unique(subset(spot.DEGs.ct2, avg_log2FC < 0)$gene)
+writeLines(c(paste0("up\t",paste(spot.DEGs.ct2.up, collapse=",")),
+           paste0("down\t",paste(spot.DEGs.ct2.down, collapse=","))),
+           paste0("../001ST/001Giotto_out/003DEGs/wilcox/", ct, "_enriched.txt"))
+```
+
+#### Oligo specific
+```{r}
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+spot.DEGs.sub <- subset(spot.DEGs, comparison == "PLX5622_vs_FADCtrl")
+ct <- "Oligo"
+df1 <- subset(cell.DEGs, cluster == ct)
+df2 <- subset(cell.DEGs, cluster != ct)
+ct.specific <- setdiff(df1$gene, df2$gene)
+length(ct.specific)
+spot.DEGs.ct <- subset(spot.DEGs.sub, gene %in% ct.specific)
+X <- length(unique(spot.DEGs.ct$gene))
+down <- subset(spot.DEGs.ct, spot.DEGs.ct$avg_log2FC < 0)
+Y <- length(unique(down$gene))*100 / length(unique(spot.DEGs.ct$gene))
+a <- subset(spot.DEGs.ct, brain_region %in% c("Thalamus", "Olfactory area"))
+Z <- length(unique(a$gene))*100 / length(unique(spot.DEGs.ct$gene))
+out <- paste0("We observed that ", round(X, 1), " of PLX5622-responsive genes were enriched in ", ct, ", and ", round(Y, 1), "% of them were downregulated (Fig. Ext. 4e). ", round(Z, 1), "% of the ", ct, "-specific PLX5622-responsive genes were located in the two brain regions with the highest Aβ burden—the olfactory cortical area and thalamus")
+print(out)
+```
+```
+"We observed that 33 of PLX5622-responsive genes were enriched in Oligo, and 84.8% of them were downregulated (Fig. Ext. 4e). 81.8% of the Oligo-specific PLX5622-responsive genes were located in the two brain regions with the highest Aβ burden—the olfactory cortical area and thalamus"
+```
+
+### DEGs Heatmap Drawing
+#### Load Data
+```{r}
+# Load spot DEGs
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+head(spot.DEGs)
+# p_val avg_log2FC pct.1 pct.2 p_val_adj brain_region comparison gene
+# Thy1 0.000000e+00 2.2648989 0.999 0.996 0.000000e+00 Isocortex FADCtrl_vs_WTCtrl Thy1
+# Gfap 1.040859e-252 1.1939180 0.854 0.268 1.930897e-248 Isocortex FADCtrl_vs_WTCtrl Gfap
+# Ctsd 8.787947e-158 0.9353749 0.996 0.994 1.630252e-153 Isocortex FADCtrl_vs_WTCtrl Ctsd
+# Tyrobp 2.050541e-145 0.9585237 0.840 0.508 3.803959e-141 Isocortex FADCtrl_vs_WTCtrl Tyrobp
+# Cst7 7.212608e-136 0.4824200 0.379 0.003 1.338011e-131 Isocortex FADCtrl_vs_WTCtrl Cst7
+# B2m 3.464400e-131 0.6965407 0.976 0.917 6.426808e-127 Isocortex FADCtrl_vs_WTCtrl B2m
+# Load Level 1 marker genes.
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+head(cell.DEGs)
+# p_val avg_log2FC pct.1 pct.2 p_val_adj cluster gene
+# St18 0 2.026990 0.965 0.180 0 Oligo St18
+# Mbp 0 2.001661 0.992 0.387 0 Oligo Mbp
+# Prr5l 0 1.964242 0.941 0.114 0 Oligo Prr5l
+# Neat1 0 1.845240 0.923 0.211 0 Oligo Neat1
+# Mobp 0 1.800589 0.893 0.140 0 Oligo Mobp
+# Mag 0 1.624231 0.860 0.156 0 Oligo Mag
+```
+
+#### Style 3: Detailed Adjustments (Astro, Oligo)
+Code modifications:
+todo:
+- Add gaps for different clusters? Is there any description of clusters in the paper?
+- Use color to indicate brain regions?
+
+Completed:
+- Adjusted image size.
+- Gene names in italics.
+- Added rescued column.
+- Olfactory cortical area.
+- Whether to change the color of comparison combinations? Remove it directly, as it seems to have little effect.
+- Removed anno.col and anno.row.
+- Unified heatmap colors?
+- Font size unified to 8.
+- Font unified to Arial.
+- Cluster IDs numbered sequentially from top to bottom. Make the source data consistent with the clusters shown in the figure.
+
+Adobe Illustrator modifications:
+todo:
+a. Label the two comparison combinations above the image.
+b. Add scaled lfc legend title.
+c. Place the Rescued genes color legend below the scaled lfc legend.
+d. Label directly above.
+e. Cluster IDs numbered sequentially from top to bottom.
+
+#### Astro, Oligo (Enriched)
+```{r st-degs-heatmap-pdf}
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+# --- 0. Read data and define order (unchanged) ---
+Abeta.merged <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/delta_Abeta.csv", row.names=1)
+br.order <- rev(Abeta.merged$brain_region)
+br.order <- br.order[!grepl("Ventricle", br.order)]
+# --- 1. Prepare data ---
+# Assume cell.DEGs and spot.DEGs already exist in the environment
+for (ct in c("Astro", "Oligo")) {
+  # ct <- "Astro"
+  only_PL_vs_AD <- TRUE
+ 
+  # ct_genes <- setdiff(cell.DEGs$gene[cell.DEGs$cluster == ct],
+  # cell.DEGs$gene[cell.DEGs$cluster != ct])
+ 
+  # ct.enriched <- subset(cell.DEGs, cluster == ct)
+  ct.enriched2 <- subset(cell.DEGs, abs(avg_log2FC) > 0.4 & cluster == ct)
+ 
+  sub_dat <- subset(spot.DEGs, gene %in% ct.enriched2$gene &
+                    comparison %in% c("FADCtrl_vs_WTCtrl", "PLX5622_vs_FADCtrl"))
+ 
+  # [Modification 1]: Ensure the brain region list is sorted according to br.order, not alphabetical order
+  # This step is very important. First take the intersection to keep only existing brain regions while maintaining the order of br.order
+  available_regions <- unique(sub_dat$brain_region)
+  sorted_regions <- br.order[br.order %in% available_regions]
+ 
+  if (only_PL_vs_AD) {
+    all_genes <- unique(subset(sub_dat, comparison == "PLX5622_vs_FADCtrl")$gene)
+  } else {
+    all_genes <- unique(sub_dat$gene)
+  }
+ 
+ 
+  # --- 2. Matrix extraction function (fine-tuned to adapt to sorting) ---
+  get_matrix <- function(comp_name) {
+    tmp <- dcast(subset(sub_dat, comparison == comp_name),
+                 gene ~ brain_region, value.var = "avg_log2FC", fill = 0)
+    rownames(tmp) <- tmp$gene
+    tmp <- tmp[, -1]
+   
+    # Initialize matrix
+    res <- matrix(0, nrow = length(all_genes), ncol = length(sorted_regions),
+                  dimnames = list(all_genes, sorted_regions)) # Note: sorted_regions is used here
+   
+    common_g <- intersect(rownames(tmp), all_genes)
+    common_r <- intersect(colnames(tmp), sorted_regions)
+   
+    if(length(common_g) > 0 && length(common_r) > 0){
+      res[common_g, common_r] <- as.matrix(tmp[common_g, common_r])
+    }
+   
+    # [Core of Modification 1]: Force reordering according to sorted_regions
+    res <- res[, sorted_regions, drop=FALSE]
+    return(res)
+  }
+ 
+  mat_AD <- get_matrix("FADCtrl_vs_WTCtrl")
+  mat_PL <- get_matrix("PLX5622_vs_FADCtrl")
+ 
+  # --- 3. Merge and process column names ---
+ 
+  mat_final <- cbind(mat_AD, mat_PL)
+ 
+  # Force modification of column names to make them unique
+  colnames(mat_final) <- c(paste0("AD_", sorted_regions), paste0("PL_", sorted_regions))
+  sorted_regions.renamed <- sub("Olfactory area", "Olfactory cortical area", sorted_regions)
+ 
+  # --- 4. Scale (vectorized method) ---
+  row_max <- apply(abs(mat_final), 1, max)
+  # Prevent division by zero
+  row_max[row_max == 0] <- 1
+  mat_scaled <- mat_final / row_max
+ 
+  # --- 5. Pre-compute clustering to generate Cluster annotation (Modification 2 & 3) ---
+ 
+  # To obtain specific Cluster numbers (1-6), we need to perform hierarchical clustering before plotting
+  # Calculate distance and clustering tree
+  gene_dist <- dist(mat_scaled, method = "euclidean")
+  gene_hclust <- hclust(gene_dist, method = "complete")
+ 
+  # Cut genes into 6 clusters
+  gene_clusters <- cutree(gene_hclust, k = 6)
+ 
+  # Sort the matrix according to clustering results
+  mat_scaled <- mat_scaled[gene_hclust$order, ]
+ 
+  # Build row annotation data frame (Row Annotation)
+  # This will add a color bar on the left side of the heatmap with a legend indicating which Cluster
+  # anno_row <- data.frame(Cluster = factor(paste0("Cluster ", gene_clusters)))
+  # rownames(anno_row) <- rownames(mat_scaled)
+ 
+  # rescued genes annotation
+  st.DEGs.rescued <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.rescued.csv", row.names=1)
+ 
+  # In R, I have a dataframe with two columns: gene and direction, both strings. Now I need to group by gene and merge the directions belonging to the same gene into one string separated by commas. Please help me write the code.
+  # Using dplyr as an example
+  library(dplyr)
+  result <- st.DEGs.rescued %>%
+    group_by(gene) %>%
+    summarise(direction = paste(unique(direction), collapse = ","))
+ 
+  # Remove contradictions between brain regions.
+  result2 <- subset(result, direction=="down rescued" | direction=="up rescued")
+  result2 <- data.frame(result2)
+  row.names(result2) <- result2$gene
+ 
+  anno_row <- data.frame(Rescued=result2[rownames(mat_scaled), "direction"], row.names=rownames(mat_scaled))
+  anno_row$Rescued[is.na(anno_row$Rescued)] <- "None"
+ 
+  # --- 6. Plot preparation ---
+ 
+  # Column annotation (Column Annotation)
+  # anno_col <- data.frame(Group = factor(rep(c("AD vs WT", "PL vs AD"), each = length(sorted_regions)),
+  # levels = c("AD vs WT", "PL vs AD")))
+  # rownames(anno_col) <- colnames(mat_scaled)
+ 
+  # Color settings
+  # Automatically assign colors to 6 Clusters, or you can specify manually
+  # cluster_colors <- brewer.pal(6, "Set2")
+  # names(cluster_colors) <- paste0("Cluster ", 1:6)
+ 
+  # anno_colors <- list(
+  # Group = c("AD vs WT"="#E69F00", "PL vs AD"="#56B4E9"),
+  # Cluster = cluster_colors # Add color mapping for Cluster
+  # )
+ 
+  anno_colors <- list(Rescued=c("None"="grey", "up rescued"="red", "down rescued"="blue"))
+ 
+  # Main panel color settings
+  my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+ 
+  # --- 7. Final plotting ---
+  p <- pheatmap(mat_scaled,
+           # Row clustering settings
+           # cluster_rows = gene_hclust, # Use the pre-computed clustering tree
+           cluster_rows = F,
+           # cutree_rows = 6, # [Modification 2]: Divide rows into 6 clusters and add gaps
+          
+           # Column clustering settings
+           cluster_cols = FALSE, # [Modification 1]: Turn off column clustering and strictly follow the sorted_regions we set
+          
+           # Colors and breaks
+           color = my_colors, # How to control the length and width of pheatmap legend?
+           breaks = seq(-1, 1, length.out = 101),
+          
+           # Annotations
+           # annotation_col = anno_col,
+           annotation_row = anno_row, # How to display pheatmap anno row but not show the corresponding legend?
+           annotation_legend = FALSE,
+           annotation_colors = anno_colors,
+          
+           # Gap settings
+           gaps_col = length(sorted_regions), # Add gap between the two comparison groups
+          
+           # Label settings
+           labels_col = rep(sorted_regions.renamed, 2), # Use original brain region names as labels
+           show_rownames = T, # Usually do not show row names when there are too many genes; change to TRUE if needed
+          
+           main = paste0("Transcriptional alterations of ", ct, " \nenriched genes across comparisons"), # I have a heatmap showing scaled log2 fold change of genes highly expressed in astrocytes across two comparison combinations. What should the title of this heatmap be?
+           # border_color = NA, # Having borders looks better
+           # fontsize=7, # Title font is set below, not bold, to save space.
+           fontsize_row=8,
+           fontsize_col=8,
+           silent = T
+  )
+ 
+  # Modify font to italic.
+  library(grid)
+  idx <- grep("row_names", p$gtable$layout$name)
+  p$gtable$grobs[[idx]]$gp <- gpar(fontface = "italic", fontsize=8)
+ 
+  idx <- grep("main", p$gtable$layout$name)
+  p$gtable$grobs[[idx]]$gp <- gpar(fontsize=8)
+ 
+  if (ct == "Astro") {
+    width=3.68
+    height=6
+  } else if (ct == "Oligo") {
+    width=3.68
+    height=5.2
+  }
+ 
+  # Draw pdf
+  out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", ct, "_ST_DEGs_heatmap.pdf")
+  cairo_pdf(out.path, width, height, family = "Arial")
+  grid.newpage()
+  grid.draw(p$gtable)
+  dev.off()
+ 
+  # When using R's png function to plot and specifying Arial font, it shows: Windows font database does not have such a font family. How to solve?
+  # Answer: Add the following line.
+  windowsFonts(Arial = windowsFont("Arial"))
+  out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", ct, "_ST_DEGs_heatmap.png")
+  png(out.path, width, height, family = "Arial", units = "in", res=300)
+  grid.newpage()
+  grid.draw(p$gtable)
+  dev.off()
+}
+```
+output:
+```{r}
+knitr::include_graphics("../001ST/001Giotto_out/003DEGs/wilcox/Oligo_ST_DEGs_heatmap.png")
+knitr::include_graphics("../001ST/001Giotto_out/003DEGs/wilcox/Astro_ST_DEGs_heatmap.png")
+```
+
+
+#### Astro (specific)
+```{r}
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+# --- 0. Read data and define order (unchanged) ---
+Abeta.merged <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/delta_Abeta.csv", row.names=1)
+br.order <- rev(Abeta.merged$brain_region)
+br.order <- br.order[!grepl("Ventricle", br.order)]
+ST_DEGs_heatmap <- function(glist, p.title, width=3.68, height=6) {
+ 
+  only_PL_vs_AD <- TRUE
+ 
+  sub_dat <- subset(spot.DEGs, gene %in% glist &
+                    comparison %in% c("FADCtrl_vs_WTCtrl", "PLX5622_vs_FADCtrl"))
+ 
+  # [Modification 1]: Ensure the brain region list is sorted according to br.order rather than alphabetical order
+  # This step is critical. Take the intersection first to retain only existing brain regions while preserving the order of br.order
+  available_regions <- unique(sub_dat$brain_region)
+  sorted_regions <- br.order[br.order %in% available_regions]
+ 
+  if (only_PL_vs_AD) {
+    all_genes <- unique(subset(sub_dat, comparison == "PLX5622_vs_FADCtrl")$gene)
+  } else {
+    all_genes <- unique(sub_dat$gene)
+  }
+ 
+ 
+  # --- 2. Matrix extraction function (fine-tuned to adapt to sorting) ---
+  get_matrix <- function(comp_name) {
+    tmp <- dcast(subset(sub_dat, comparison == comp_name),
+                 gene ~ brain_region, value.var = "avg_log2FC", fill = 0)
+    rownames(tmp) <- tmp$gene
+    tmp <- tmp[, -1]
+   
+    # Initialize matrix
+    res <- matrix(0, nrow = length(all_genes), ncol = length(sorted_regions),
+                  dimnames = list(all_genes, sorted_regions)) # Note: sorted_regions is used here
+   
+    common_g <- intersect(rownames(tmp), all_genes)
+    common_r <- intersect(colnames(tmp), sorted_regions)
+   
+    if(length(common_g) > 0 && length(common_r) > 0){
+      res[common_g, common_r] <- as.matrix(tmp[common_g, common_r])
+    }
+   
+    # [Core of Modification 1]: Force reordering according to sorted_regions
+    res <- res[, sorted_regions, drop=FALSE]
+    return(res)
+  }
+ 
+  mat_AD <- get_matrix("FADCtrl_vs_WTCtrl")
+  mat_PL <- get_matrix("PLX5622_vs_FADCtrl")
+ 
+  # --- 3. Merge and process column names ---
+ 
+  mat_final <- cbind(mat_AD, mat_PL)
+ 
+  # Force modification of column names to make them unique
+  colnames(mat_final) <- c(paste0("AD_", sorted_regions), paste0("PL_", sorted_regions))
+  sorted_regions.renamed <- sub("Olfactory area", "Olfactory cortical area", sorted_regions)
+ 
+  # --- 4. Scale (vectorized method) ---
+  row_max <- apply(abs(mat_final), 1, max)
+  # Prevent division by zero
+  row_max[row_max == 0] <- 1
+  mat_scaled <- mat_final / row_max
+ 
+  # --- 5. Pre-compute clustering to generate Cluster annotation (Modification 2 & 3) ---
+ 
+  # To obtain specific Cluster numbers (1-6), we need to perform hierarchical clustering before plotting
+  # Calculate distance and clustering tree
+  gene_dist <- dist(mat_scaled, method = "euclidean")
+  gene_hclust <- hclust(gene_dist, method = "complete")
+ 
+  # Cut genes into 6 clusters
+  # gene_clusters <- cutree(gene_hclust, k = 6)
+ 
+  # Sort the matrix according to clustering results
+  mat_scaled <- mat_scaled[gene_hclust$order, ]
+ 
+  # Build row annotation data frame (Row Annotation)
+  # This will add a color bar on the left side of the heatmap with a legend indicating which Cluster
+  # anno_row <- data.frame(Cluster = factor(paste0("Cluster ", gene_clusters)))
+  # rownames(anno_row) <- rownames(mat_scaled)
+ 
+  # rescued genes annotation
+  st.DEGs.rescued <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.rescued.csv", row.names=1)
+ 
+  # In R, I have a dataframe with two columns: gene and direction, both strings. Now I need to group by gene and merge the directions belonging to the same gene into one string separated by commas. Please help me write the code.
+  # Using dplyr as an example
+  library(dplyr)
+  result <- st.DEGs.rescued %>%
+    group_by(gene) %>%
+    summarise(direction = paste(unique(direction), collapse = ","))
+ 
+  # Remove contradictions between brain regions.
+  result2 <- subset(result, direction=="down rescued" | direction=="up rescued")
+  result2 <- data.frame(result2)
+  row.names(result2) <- result2$gene
+ 
+  anno_row <- data.frame(Rescued=result2[rownames(mat_scaled), "direction"], row.names=rownames(mat_scaled))
+  anno_row$Rescued[is.na(anno_row$Rescued)] <- "None"
+ 
+  # --- 6. Plot preparation ---
+ 
+  anno_colors <- list(Rescued=c("None"="grey", "up rescued"="red", "down rescued"="blue"))
+ 
+  # Main panel color settings
+  my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+ 
+  # --- 7. Final plotting ---
+  p <- pheatmap(mat_scaled,
+           # Row clustering settings
+           # cluster_rows = gene_hclust, # Use the pre-computed clustering tree
+           cluster_rows = F,
+           # cutree_rows = 6, # [Modification 2]: Divide rows into 6 clusters and add gaps
+          
+           # Column clustering settings
+           cluster_cols = FALSE, # [Modification 1]: Turn off column clustering and strictly follow the sorted_regions we set
+          
+           # Colors and breaks
+           color = my_colors, # How to control the length and width of pheatmap legend?
+           breaks = seq(-1, 1, length.out = 101),
+          
+           # Annotations
+           # annotation_col = anno_col,
+           annotation_row = anno_row, # How to display pheatmap anno row but not show the corresponding legend?
+           annotation_legend = FALSE,
+           annotation_colors = anno_colors,
+          
+           # Gap settings
+           gaps_col = length(sorted_regions), # Add gap between the two comparison groups
+          
+           # Label settings
+           labels_col = rep(sorted_regions.renamed, 2), # Use original brain region names as labels
+           show_rownames = T, # Usually do not show row names when there are too many genes; change to TRUE if needed
+          
+           main = paste0("Transcriptional alterations of\n", prefix, " genes across comparisons"), # I have a heatmap showing scaled log2 fold change of genes highly expressed in astrocytes across two comparison combinations. What should the title of this heatmap be?
+           # border_color = NA, # Having borders looks better
+           # fontsize=7, # Title font is set below, not bold, to save space.
+           fontsize_row=8,
+           fontsize_col=8,
+           silent = T
+  )
+ 
+  # Modify font to italic.
+  library(grid)
+  idx <- grep("row_names", p$gtable$layout$name)
+  p$gtable$grobs[[idx]]$gp <- gpar(fontface = "italic", fontsize=8)
+ 
+  idx <- grep("main", p$gtable$layout$name)
+  p$gtable$grobs[[idx]]$gp <- gpar(fontsize=8)
+ 
+  width=width
+  height=height
+ 
+  # Draw pdf
+  out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", make.names(prefix), "_ST_DEGs_heatmap.pdf")
+  cairo_pdf(out.path, width, height, family = "Arial")
+  grid.newpage()
+  grid.draw(p$gtable)
+  dev.off()
+ 
+  # When using R's png function to plot and specifying Arial font, it shows: Windows font database does not have such a font family. How to solve?
+  # Answer: Add the following line.
+  windowsFonts(Arial = windowsFont("Arial"))
+  out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", make.names(prefix), "_ST_DEGs_heatmap.png")
+  png(out.path, width, height, family = "Arial", units = "in", res=300)
+  grid.newpage()
+  grid.draw(p$gtable)
+  dev.off()
+}
+ct <- "Astro"
+ct_genes <- setdiff(cell.DEGs$gene[cell.DEGs$cluster == ct],
+                    cell.DEGs$gene[cell.DEGs$cluster != ct])
+prefix <- "Astro signature"
+ST_DEGs_heatmap(ct_genes, prefix, width=3.68, height=5)
+```
+
+#### Reactive astrocytes
+```{r}
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+# --- 0. Read data and define order (unchanged) ---
+Abeta.merged <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/delta_Abeta.csv", row.names=1)
+br.order <- rev(Abeta.merged$brain_region)
+br.order <- br.order[!grepl("Ventricle", br.order)]
+# --- 1. Prepare data ---
+# Assume cell.DEGs and spot.DEGs already exist in the environment
+ST_DEGs_heatmap <- function(glist, p.title, width=3.68, height=6) {
+ 
+  only_PL_vs_AD <- TRUE
+ 
+  sub_dat <- subset(spot.DEGs, gene %in% glist &
+                    comparison %in% c("FADCtrl_vs_WTCtrl", "PLX5622_vs_FADCtrl"))
+ 
+  # [Modification 1]: Ensure the brain region list is sorted according to br.order rather than alphabetical order
+  # This step is critical. Take the intersection first to retain only existing brain regions while preserving the order of br.order
+  available_regions <- unique(sub_dat$brain_region)
+  sorted_regions <- br.order[br.order %in% available_regions]
+ 
+  if (only_PL_vs_AD) {
+    all_genes <- unique(subset(sub_dat, comparison == "PLX5622_vs_FADCtrl")$gene)
+  } else {
+    all_genes <- unique(sub_dat$gene)
+  }
+ 
+ 
+  # --- 2. Matrix extraction function (fine-tuned to adapt to sorting) ---
+  get_matrix <- function(comp_name) {
+    tmp <- dcast(subset(sub_dat, comparison == comp_name),
+                 gene ~ brain_region, value.var = "avg_log2FC", fill = 0)
+    rownames(tmp) <- tmp$gene
+    tmp <- tmp[, -1]
+   
+    # Initialize matrix
+    res <- matrix(0, nrow = length(all_genes), ncol = length(sorted_regions),
+                  dimnames = list(all_genes, sorted_regions)) # Note: sorted_regions is used here
+   
+    common_g <- intersect(rownames(tmp), all_genes)
+    common_r <- intersect(colnames(tmp), sorted_regions)
+   
+    if(length(common_g) > 0 && length(common_r) > 0){
+      res[common_g, common_r] <- as.matrix(tmp[common_g, common_r])
+    }
+   
+    # [Core of Modification 1]: Force reordering according to sorted_regions
+    res <- res[, sorted_regions, drop=FALSE]
+    return(res)
+  }
+ 
+  mat_AD <- get_matrix("FADCtrl_vs_WTCtrl")
+  mat_PL <- get_matrix("PLX5622_vs_FADCtrl")
+ 
+  # --- 3. Merge and process column names ---
+ 
+  mat_final <- cbind(mat_AD, mat_PL)
+ 
+  # Force modification of column names to make them unique
+  colnames(mat_final) <- c(paste0("AD_", sorted_regions), paste0("PL_", sorted_regions))
+  sorted_regions.renamed <- sub("Olfactory area", "Olfactory cortical area", sorted_regions)
+ 
+  # --- 4. Scale (vectorized method) ---
+  row_max <- apply(abs(mat_final), 1, max)
+  # Prevent division by zero
+  row_max[row_max == 0] <- 1
+  mat_scaled <- mat_final / row_max
+ 
+  # --- 5. Pre-compute clustering to generate Cluster annotation (Modification 2 & 3) ---
+ 
+  # To obtain specific Cluster numbers (1-6), we need to perform hierarchical clustering before plotting
+  # Calculate distance and clustering tree
+  gene_dist <- dist(mat_scaled, method = "euclidean")
+  gene_hclust <- hclust(gene_dist, method = "complete")
+ 
+  # Cut genes into 6 clusters
+  # gene_clusters <- cutree(gene_hclust, k = 6)
+ 
+  # Sort the matrix according to clustering results
+  mat_scaled <- mat_scaled[gene_hclust$order, ]
+ 
+  # Build row annotation data frame (Row Annotation)
+  # This will add a color bar on the left side of the heatmap with a legend indicating which Cluster
+  # anno_row <- data.frame(Cluster = factor(paste0("Cluster ", gene_clusters)))
+  # rownames(anno_row) <- rownames(mat_scaled)
+ 
+  # rescued genes annotation
+  st.DEGs.rescued <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.rescued.csv", row.names=1)
+ 
+  # In R, I have a dataframe with two columns: gene and direction, both strings. Now I need to group by gene and merge the directions belonging to the same gene into one string separated by commas. Please help me write the code.
+  # Using dplyr as an example
+  library(dplyr)
+  result <- st.DEGs.rescued %>%
+    group_by(gene) %>%
+    summarise(direction = paste(unique(direction), collapse = ","))
+ 
+  # Remove contradictions between brain regions.
+  result2 <- subset(result, direction=="down rescued" | direction=="up rescued")
+  result2 <- data.frame(result2)
+  row.names(result2) <- result2$gene
+ 
+  anno_row <- data.frame(Rescued=result2[rownames(mat_scaled), "direction"], row.names=rownames(mat_scaled))
+  anno_row$Rescued[is.na(anno_row$Rescued)] <- "None"
+ 
+  # --- 6. Plot preparation ---
+ 
+  anno_colors <- list(Rescued=c("None"="grey", "up rescued"="red", "down rescued"="blue"))
+ 
+  # Main panel color settings
+  my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+ 
+  # --- 7. Final plotting ---
+  p <- pheatmap(mat_scaled,
+           # Row clustering settings
+           # cluster_rows = gene_hclust, # Use the pre-computed clustering tree
+           cluster_rows = F,
+           # cutree_rows = 6, # [Modification 2]: Divide rows into 6 clusters and add gaps
+          
+           # Column clustering settings
+           cluster_cols = FALSE, # [Modification 1]: Turn off column clustering and strictly follow the sorted_regions we set
+          
+           # Colors and breaks
+           color = my_colors, # How to control the length and width of pheatmap legend?
+           breaks = seq(-1, 1, length.out = 101),
+          
+           # Annotations
+           # annotation_col = anno_col,
+           annotation_row = anno_row, # How to display pheatmap anno row but not show the corresponding legend?
+           annotation_legend = FALSE,
+           annotation_colors = anno_colors,
+          
+           # Gap settings
+           gaps_col = length(sorted_regions), # Add gap between the two comparison groups
+          
+           # Label settings
+           labels_col = rep(sorted_regions.renamed, 2), # Use original brain region names as labels
+           show_rownames = T, # Usually do not show row names when there are too many genes; change to TRUE if needed
+          
+           main = paste0("Transcriptional alterations of\n", prefix, " ST DEGs across comparisons"), # I have a heatmap showing scaled log2 fold change of genes highly expressed in astrocytes across two comparison combinations. What should the title of this heatmap be?
+           # border_color = NA, # Having borders looks better
+           # fontsize=7, # Title font is set below, not bold, to save space.
+           fontsize_row=8,
+           fontsize_col=8,
+           silent = T
+  )
+ 
+  # Modify font to italic.
+  library(grid)
+  idx <- grep("row_names", p$gtable$layout$name)
+  p$gtable$grobs[[idx]]$gp <- gpar(fontface = "italic", fontsize=8)
+ 
+  idx <- grep("main", p$gtable$layout$name)
+  p$gtable$grobs[[idx]]$gp <- gpar(fontsize=8)
+ 
+  width=width
+  height=height
+ 
+  # Draw pdf
+  out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", make.names(prefix), "_ST_DEGs_heatmap.pdf")
+  cairo_pdf(out.path, width, height, family = "Arial")
+  grid.newpage()
+  grid.draw(p$gtable)
+  dev.off()
+ 
+  # When using R's png function to plot and specifying Arial font, it shows: Windows font database does not have such a font family. How to solve?
+  # Answer: Add the following line.
+  windowsFonts(Arial = windowsFont("Arial"))
+  out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", make.names(prefix), "_ST_DEGs_heatmap.png")
+  png(out.path, width, height, family = "Arial", units = "in", res=300)
+  grid.newpage()
+  grid.draw(p$gtable)
+  dev.off()
+}
+```
+```{r}
+pan <- c(
+"Lcn2",
+"Steap4",
+"S1pr3",
+"Timp1",
+"Hspb1",
+"Cxcl10",
+"Cd44",
+"Osmr",
+"Cp",
+"Serpina3n",
+"Aspg",
+"Vim",
+"Gfap"
+)
+A1 <- c(
+"H2-T23",
+"Serping1",
+"H2-D1",
+"Ggta1",
+"ligp1",
+"Gbp2",
+"Fbln5",
+"Ugt1a1",
+"Fkbp5",
+"Psmb8",
+"Srgn",
+"Amigo2"
+)
+A2 <- c(
+"Clcf1",
+"Tgm1",
+"Ptx3",
+"S100a10",
+"Sphk1",
+"Cd109",
+"Ptgs2",
+"Emp1",
+"Slc10a6",
+"Tm4sf1",
+"B3gnt5",
+"Cd14"
+)
+Immu <- c("Il1b", "Il6", "Tnf", "Ifng", "Tgfb1", "Ccl2", "Ccl3", "Ccl5", "Ccl20", "Cxcl1", "Cxcl10", "C3", "Cfb")
+prefix <- "reactive Astro"
+ST_DEGs_heatmap(c(pan, A1, A2, Immu), prefix, width=3.68, height=3)
+```
+
+#### Glu
+```{r}
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+# --- 0. Read data and define order (unchanged) ---
+Abeta.merged <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/delta_Abeta.csv", row.names=1)
+br.order <- rev(Abeta.merged$brain_region)
+br.order <- br.order[!grepl("Ventricle", br.order)]
+# --- 1. Prepare data ---
+# Assume cell.DEGs and spot.DEGs already exist in the environment
+ct <- "Glu"
+only_PL_vs_AD <- TRUE
+ct_genes <- setdiff(cell.DEGs$gene[cell.DEGs$cluster == ct],
+                    cell.DEGs$gene[cell.DEGs$cluster != ct])
+prefix <- "Glu signature"
+ST_DEGs_heatmap(ct_genes, prefix, width=3.68, height=11)
+```
+
+#### Micro
+Differences from Astro:
+1. Do not display gene names.
+2. border = F
+3. Change the chart title to "microglia".
+4. Adjust image size.
+
+```{r}
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+# --- 0. Read data and define order (unchanged) ---
+Abeta.merged <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/delta_Abeta.csv", row.names=1)
+br.order <- rev(Abeta.merged$brain_region)
+br.order <- br.order[!grepl("Ventricle", br.order)]
+# --- 1. Prepare data ---
+# Assume cell.DEGs and spot.DEGs already exist in the environment
+ct <- "Micro"
+only_PL_vs_AD <- TRUE
+ct_genes <- setdiff(cell.DEGs$gene[cell.DEGs$cluster == ct],
+                    cell.DEGs$gene[cell.DEGs$cluster != ct])
+sub_dat <- subset(spot.DEGs, gene %in% ct_genes &
+                  comparison %in% c("FADCtrl_vs_WTCtrl", "PLX5622_vs_FADCtrl"))
+# [Modification 1]: Ensure the brain region list is sorted according to br.order rather than alphabetical order
+# This step is critical. Take the intersection first to retain only existing brain regions while preserving the order of br.order
+available_regions <- unique(sub_dat$brain_region)
+sorted_regions <- br.order[br.order %in% available_regions]
+if (only_PL_vs_AD) {
+  all_genes <- unique(subset(sub_dat, comparison == "PLX5622_vs_FADCtrl")$gene)
+} else {
+  all_genes <- unique(sub_dat$gene)
+}
+# --- 2. Matrix extraction function (fine-tuned to adapt to sorting) ---
+get_matrix <- function(comp_name) {
+  tmp <- dcast(subset(sub_dat, comparison == comp_name),
+               gene ~ brain_region, value.var = "avg_log2FC", fill = 0)
+  rownames(tmp) <- tmp$gene
+  tmp <- tmp[, -1]
+ 
+  # Initialize matrix
+  res <- matrix(0, nrow = length(all_genes), ncol = length(sorted_regions),
+                dimnames = list(all_genes, sorted_regions)) # Note: sorted_regions is used here
+ 
+  common_g <- intersect(rownames(tmp), all_genes)
+  common_r <- intersect(colnames(tmp), sorted_regions)
+ 
+  if(length(common_g) > 0 && length(common_r) > 0){
+    res[common_g, common_r] <- as.matrix(tmp[common_g, common_r])
+  }
+ 
+  # [Core of Modification 1]: Force reordering according to sorted_regions
+  res <- res[, sorted_regions, drop=FALSE]
+  return(res)
+}
+mat_AD <- get_matrix("FADCtrl_vs_WTCtrl")
+mat_PL <- get_matrix("PLX5622_vs_FADCtrl")
+# --- 3. Merge and process column names ---
+mat_final <- cbind(mat_AD, mat_PL)
+# Force modification of column names to make them unique
+colnames(mat_final) <- c(paste0("AD_", sorted_regions), paste0("PL_", sorted_regions))
+sorted_regions.renamed <- sub("Olfactory area", "Olfactory cortical area", sorted_regions)
+# --- 4. Scale (vectorized method) ---
+row_max <- apply(abs(mat_final), 1, max)
+# Prevent division by zero
+row_max[row_max == 0] <- 1
+mat_scaled <- mat_final / row_max
+# --- 5. Pre-compute clustering to generate Cluster annotation (Modification 2 & 3) ---
+# To obtain specific Cluster numbers (1-6), we need to perform hierarchical clustering before plotting
+# Calculate distance and clustering tree
+gene_dist <- dist(mat_scaled, method = "euclidean")
+gene_hclust <- hclust(gene_dist, method = "complete")
+# Cut genes into 6 clusters
+gene_clusters <- cutree(gene_hclust, k = 6)
+# Sort the matrix according to clustering results
+mat_scaled <- mat_scaled[gene_hclust$order, ]
+# Build row annotation data frame (Row Annotation)
+# This will add a color bar on the left side of the heatmap with a legend indicating which Cluster
+# anno_row <- data.frame(Cluster = factor(paste0("Cluster ", gene_clusters)))
+# rownames(anno_row) <- rownames(mat_scaled)
+# rescued genes annotation
+st.DEGs.rescued <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.rescued.csv", row.names=1)
+# In R, I have a dataframe with two columns: gene and direction, both strings. Now I need to group by gene and merge the directions belonging to the same gene into one string separated by commas. Please help me write the code.
+# Using dplyr as an example
+library(dplyr)
+result <- st.DEGs.rescued %>%
+  group_by(gene) %>%
+  summarise(direction = paste(unique(direction), collapse = ","))
+# Remove contradictions between brain regions.
+result2 <- subset(result, direction=="down rescued" | direction=="up rescued")
+result2 <- data.frame(result2)
+row.names(result2) <- result2$gene
+anno_row <- data.frame(Rescued=result2[rownames(mat_scaled), "direction"], row.names=rownames(mat_scaled))
+anno_row$Rescued[is.na(anno_row$Rescued)] <- "None"
+# --- 6. Plot preparation ---
+# Column annotation (Column Annotation)
+# anno_col <- data.frame(Group = factor(rep(c("AD vs WT", "PL vs AD"), each = length(sorted_regions)),
+# levels = c("AD vs WT", "PL vs AD")))
+# rownames(anno_col) <- colnames(mat_scaled)
+# Color settings
+# Automatically assign colors to 6 Clusters, or you can specify manually
+# cluster_colors <- brewer.pal(6, "Set2")
+# names(cluster_colors) <- paste0("Cluster ", 1:6)
+# anno_colors <- list(
+# Group = c("AD vs WT"="#E69F00", "PL vs AD"="#56B4E9"),
+# Cluster = cluster_colors # Add color mapping for Cluster
+# )
+anno_colors <- list(Rescued=c("None"="grey", "up rescued"="red", "down rescued"="blue"))
+# Main panel color settings
+my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+# --- 7. Final plotting ---
+p <- pheatmap(mat_scaled,
+         # Row clustering settings
+         # cluster_rows = gene_hclust, # Use the pre-computed clustering tree
+         cluster_rows = F,
+         # cutree_rows = 6, # [Modification 2]: Divide rows into 6 clusters and add gaps
+        
+         # Column clustering settings
+         cluster_cols = FALSE, # [Modification 1]: Turn off column clustering and strictly follow the sorted_regions we set
+        
+         # Colors and breaks
+         color = my_colors, # How to control the length and width of pheatmap legend?
+         breaks = seq(-1, 1, length.out = 101),
+        
+         # Annotations
+         # annotation_col = anno_col,
+         annotation_row = anno_row, # How to display pheatmap anno row but not show the corresponding legend?
+         annotation_legend = FALSE,
+         annotation_colors = anno_colors,
+        
+         # Gap settings
+         gaps_col = length(sorted_regions), # Add gap between the two comparison groups
+        
+         # Label settings
+         labels_col = rep(sorted_regions.renamed, 2), # Use original brain region names as labels
+         show_rownames = F, # Usually do not show row names when there are too many genes; change to TRUE if needed
+        
+         main = "Transcriptional alterations of microglia \nsignature genes across comparisons", # I have a heatmap showing scaled log2 fold change of genes highly expressed in astrocytes across two comparison combinations. What should the title of this heatmap be?
+         # border_color = NA, # Having borders looks better
+         # fontsize=7, # Title font is set below, not bold, to save space.
+         fontsize_row=8,
+         fontsize_col=8,
+         silent = T,
+         border_color=NA
+)
+# Modify font to italic.
+library(grid)
+idx <- grep("row_names", p$gtable$layout$name)
+p$gtable$grobs[[idx]]$gp <- gpar(fontface = "italic", fontsize=8)
+idx <- grep("main", p$gtable$layout$name)
+p$gtable$grobs[[idx]]$gp <- gpar(fontsize=8)
+width=3.5
+height=5
+# Draw pdf
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", ct, "_ST_DEGs_heatmap.pdf")
+cairo_pdf(out.path, width, height, family = "Arial")
+grid.newpage()
+grid.draw(p$gtable)
+dev.off()
+# When using R's png function to plot and specifying Arial font, it shows: Windows font database does not have such a font family. How to solve?
+# Answer: Add the following line.
+windowsFonts(Arial = windowsFont("Arial"))
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/", ct, "_ST_DEGs_heatmap.png")
+png(out.path, width, height, family = "Arial", units = "in", res=300)
+grid.newpage()
+grid.draw(p$gtable)
+dev.off()
+```
+
+#---
+## Spot DEGs Classification Discussion: By Specific Pathways
+### Investigation
+#### Mitochondrial-related genes: MitoCarta3.0
+How many genes show significant differential expression?  
+Which subdivided pathways do they mainly belong to?
+
+```{r}
+mt_db <- readxl::read_excel("../001ST/000data/Mouse.MitoCarta3.0.xls", sheet=2)
+spot.DEGs.mt <- subset(spot.DEGs, gene %in% mt_db$Symbol)
+length(unique(subset(spot.DEGs.mt, comparison == "PLX5622_vs_WTCtrl")$gene)) # 148
+length(unique(subset(spot.DEGs.mt, comparison == "FADCtrl_vs_WTCtrl")$gene)) # 106
+a <- "OXPHOS > Complex III > CIII subunits | Metabolism > Metals and cofactors > Heme-containing proteins | Metabolism > Electron carriers > Cytochromes | OXPHOS > OXPHOS subunits"
+b <- strsplit(a, " | ", fixed = T)
+d <- sapply(b[[1]], function(x){
+  strsplit(x, " > ", fixed=T)[[1]][1]
+})
+paste(unique(d), collapse=", ")
+```
+
+#### Glycolysis pathway
+```{r}
+```
+
+#### Comparison with astrocyte subtype genes from other literature
+```{r}
+st.DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+astrocytes.markers <- list(GM = c("Gria2", "Slc7a10", "Vegfa", "Fgfr3", "Grin2c"),
+Layer1 = c("Apoe", "Clu", "Slc1a2", "Sparcl1", "Aqp4"),
+WM = c("Igfbp5", "Ascl1", "Marcks", "Marcksl1", "Fos", "Dbi", "Vim", "Rack1", "Jun", "Thbs4", "Gfap", "Lima1", "S100a6"))
+astrocytes.markers2 <- unlist(astrocytes.markers)
+df <- data.frame(genes=astrocytes.markers2,
+                 subtype=rep(names(astrocytes.markers), sapply(astrocytes.markers, length)),
+           is.ST_DEGs=astrocytes.markers2 %in% st.DEGs$gene)
+# Try to subtype the Astrocytes genes from different clusters.
+df2 <- data.frame(genes=astrocytes.markers2,
+                 subtype=rep(names(astrocytes.markers), sapply(astrocytes.markers, length)))
+st.DEGs.astro <- read.csv("001Giotto_out/003DEGs/wilcox.clustering6/cell_specific/Astro/st.heatmap1.Astro.csv", row.names=1)
+st.DEGs.astro2 <- data.frame(genes=row.names(st.DEGs.astro),
+                             cluster=st.DEGs.astro$cluster)
+st.DEGs.astro3 <- merge(st.DEGs.astro2, df2, by="genes", all.x=T)
+row.names(st.DEGs.astro3) <- st.DEGs.astro3$genes
+st.DEGs.astro3 <- st.DEGs.astro3[st.DEGs.astro2$genes, ]
+# paper: Lipid-accumulated reactive astrocytes promote disease progression in epilepsy
+# Fig. 5f
+astrocytes.markers <- list("LARA-associated" = c("AQP4", "CST3", "AL627171.2", "CLU", "APOE", "GJA1", "CPE",
+                                                 "UBC", "AGT", "GLUL", "TUBB2B", "GAPDH", "ATP1B2", "PTGDS", "CKB",
+                                                 "PSAP", "PLCG2", "SCG3", "HTRA1", "WIF1"),
+                           "homeostatic" = c("SLC1A3", "GRIA2", "DDX60", "SERPING1", "XAF1", "PER3", "NTM", "VEGFA", "OGT",
+                                             "MERTK", "RNF213", "FKBP5", "LENG8"),
+                           "reactive" = c("GFAP", "DCLK1", "PSMB8", "HERC6", "STAT1", "GBP3", "USP18", "RTP4", "S100A6"))
+# Please help me write an R function named gene_symbol_human_to_mouse that converts human gene symbols to mouse gene symbols. The input is a vector containing multiple human gene symbols. Human gene symbols are all uppercase letters, while mouse gene symbols have only the first letter capitalized.
+gene_symbol_human_to_mouse <- function(human_genes) {
+  # Check if input is a character vector
+  if (!is.character(human_genes)) {
+    stop("Input must be a character vector")
+  }
+ 
+  # Create result vector
+  mouse_genes <- character(length(human_genes))
+ 
+  # Process each gene
+  for (i in seq_along(human_genes)) {
+    gene <- human_genes[i]
+   
+    # Skip empty values or NA
+    if (is.na(gene) || gene == "") {
+      mouse_genes[i] <- NA
+      next
+    }
+   
+    # Special gene conversion rules (only some common examples are listed here)
+    special_cases <- list(
+      "TP53" = "Trp53",
+      "MYC" = "Myc",
+      "EGFR" = "Egfr",
+      "KRAS" = "Kras",
+      "BRAF" = "Braf",
+      "BRCA1" = "Brca1",
+      "BRCA2" = "Brca2",
+      "AKT1" = "Akt1",
+      "PIK3CA" = "Pik3ca",
+      "PTEN" = "Pten"
+      # You can add more special conversion rules here
+    )
+   
+    # Check if it is a special gene
+    if (gene %in% names(special_cases)) {
+      mouse_genes[i] <- special_cases[[gene]]
+    } else {
+      # General conversion rule: capitalize the first letter, lowercase the rest
+      mouse_genes[i] <- paste0(
+        toupper(substr(gene, 1, 1)),
+        tolower(substr(gene, 2, nchar(gene)))
+      )
+    }
+  }
+ 
+  return(mouse_genes)
+}
+astrocytes.markers.mouse <- lapply(astrocytes.markers, gene_symbol_human_to_mouse)
+```
+
+#### Comparison with calcium overload-related genes
+```{r}
+st.DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+gene.calcium <- readLines("../004explore/excito/calcium.list")
+st.DEGs.sub <- subset(st.DEGs, st.DEGs$gene %in% gene.calcium)
+subset(st.DEGs.sub, comparison == "PLX5622_vs_FADCtrl")
+# p_val avg_log2FC pct.1 pct.2 p_val_adj brain_region
+# Hspa51 1.908734e-37 -0.2671808 0.916 0.965 3.540893e-33 Isocortex
+# Hspa53 8.251181e-13 -0.2577938 0.941 0.956 1.530677e-08 Hypothalamus
+# Hspa54 3.045602e-14 -0.3270697 0.599 0.725 5.649897e-10 Fiber tracts
+# Hspa56 3.733166e-12 -0.2520610 0.968 0.967 6.925397e-08 Cortical subplate
+# Hspa58 1.238383e-28 -0.3241217 0.847 0.953 2.297324e-24 Thalamus
+# Jun2 6.885083e-15 -0.2166024 0.386 0.590 1.277252e-10 Thalamus
+# Xbp12 4.505552e-07 -0.1359585 0.509 0.651 8.358249e-03 Thalamus
+# Hspa511 3.501544e-24 -0.3309577 0.870 0.950 6.495715e-20 Olfactory area
+# Hspa514 2.419873e-24 -0.3380465 0.886 0.974 4.489107e-20 Hippocampus
+# comparison gene
+# Hspa51 PLX5622_vs_FADCtrl Hspa5
+# Hspa53 PLX5622_vs_FADCtrl Hspa5
+# Hspa54 PLX5622_vs_FADCtrl Hspa5
+# Hspa56 PLX5622_vs_FADCtrl Hspa5
+# Hspa58 PLX5622_vs_FADCtrl Hspa5
+# Jun2 PLX5622_vs_FADCtrl Jun
+# Xbp12 PLX5622_vs_FADCtrl Xbp1
+# Hspa511 PLX5622_vs_FADCtrl Hspa5
+# Hspa514 PLX5622_vs_FADCtrl Hspa5
+# Hspa5, Jun, and Xbp1 are all downregulated in the thalamus.
+# Hspa5: ER stress (UPR), molecular chaperone (IRE1-XBP1 pathway)
+# Jun: CaMK-CREB pathway, pro-apoptotic (JNK pathway)
+# Xbp1: ER stress (UPR), activates ER stress adaptive genes after splicing
+subset(st.DEGs.sub, comparison == "FADCtrl_vs_WTCtrl" & gene %in% c("Hspa5", "Jun", "Xbp1"))
+# p_val avg_log2FC pct.1 pct.2 p_val_adj brain_region
+# Hspa5 2.714780e-10 -0.1464914 0.965 0.966 5.036188e-06 Isocortex
+# Xbp1 7.073470e-07 -0.1027323 0.788 0.815 1.312200e-02 Isocortex
+# Jun 4.828877e-08 -0.2414346 0.424 0.627 8.958050e-04 Cortical subplate
+# Jun3 1.116605e-07 -0.1529165 0.568 0.722 2.071414e-03 Olfactory area
+# Hspa510 1.351760e-06 -0.1198292 0.950 0.984 2.507649e-02 Olfactory area
+# comparison gene
+# Hspa5 FADCtrl_vs_WTCtrl Hspa5
+# Xbp1 FADCtrl_vs_WTCtrl Xbp1
+# Jun FADCtrl_vs_WTCtrl Jun
+# Jun3 FADCtrl_vs_WTCtrl Jun
+# Hspa510 FADCtrl_vs_WTCtrl Hspa5
+# Although downregulated in PL vs AD, these genes are also downregulated in AD vs WT.
+```
+
+#### Comparison with mitochondrial dysfunction-related genes
+```{r}
+st.DEGs <- read.csv("001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+gene.list <- readLines("../004explore/oxphos/mito_dysf.list")
+st.DEGs.sub <- subset(st.DEGs, st.DEGs$gene %in% gene.list)
+subset(st.DEGs.sub, comparison == "PLX5622_vs_FADCtrl")
+# p_val avg_log2FC pct.1 pct.2 p_val_adj brain_region
+# Ldha 2.111922e-14 -0.1450687 0.986 0.991 3.917826e-10 Isocortex
+# Ldha3 2.960633e-28 -0.3211464 0.986 0.999 5.492270e-24 Olfactory area
+# Vdac1 3.028440e-07 -0.1564624 0.977 0.982 5.618060e-03 Olfactory area
+# Ldha5 8.308486e-07 -0.2507557 0.982 1.000 1.541307e-02 Striatum
+# comparison gene
+# Ldha PLX5622_vs_FADCtrl Ldha
+# Ldha3 PLX5622_vs_FADCtrl Ldha
+# Vdac1 PLX5622_vs_FADCtrl Vdac1
+# Ldha5 PLX5622_vs_FADCtrl Ldha
+# The direction is inconsistent with expectations.
+# Ldha: Metabolic reprogramming (glycolysis), increased lactate production (compensatory energy supply)
+# Vdac1: ER-mitochondria coupling, increased mitochondrial membrane permeability (increased calcium release)
+```
+
+#### Gene List Organization
+- Retain AD dysregulated genes
+- AD risk genes
+- Inflammation-related genes
+- Marker genes of different cell types in SC
+- PIGs
+
+The gene list should be similar to that of SC. You can add marker genes of different cell types from SC.
+
+**Organize interested_genes:**
+```{r eval=FALSE}
+# # Inflammation-related, AD risk genes: 001Seurat_out/004DEGs/interested_genes.csv
+# Marker genes: 002SC/001Seurat_out/002cell_type_anno/cluster.L2/cluster_markers.csv
+interested_genes <- read.csv("../002SC/001Seurat_out/004DEGs/interested_genes.csv", row.names=1)
+interested_pathways <- c("Aggregation",
+                         "Processing / trafficking",
+                         "Clearance / degradation",
+                         "Mediator of Abeta toxicity",
+                         "inflammatory_response")
+interested_genes <- interested_genes[interested_genes$pathway %in% interested_pathways, ]
+cluster_markers_genes <- read.csv("../002SC/001Seurat_out/002cell_type_anno/cluster.L2/cluster_markers.csv", row.names=1)
+table(cluster_markers_genes$cluster)
+# Take top20, or filter by p_val_adj < 0.05 & avg_log2FC > 1.
+cluster_markers_genes.sub <- subset(cluster_markers_genes, p_val_adj < 0.05 & avg_log2FC > 1)
+table(cluster_markers_genes.sub$cluster)
+cluster_markers_genes.sub <- cluster_markers_genes.sub[, c("gene", "cluster")]
+colnames(cluster_markers_genes.sub) <- c("gene", "pathway")
+interested_genes.df <- rbind(interested_genes, cluster_markers_genes.sub)
+```
+
+#### Intersection Analysis Between DEGs and Gene Lists
+Perform hypergeometric tests between the organized gene lists and each DEGs list respectively.
+
+```{r eval=FALSE}
+#' is_top_n
+#'
+#' @param v A vector containing duplicate items.
+#' @param n For each duplicate item, retain the top n items.
+#'
+#' @return A logical vector, TRUE for items to retain, FALSE for items not to retain.
+#' @export
+#'
+#' @examples
+is_top_n <- function(v, n=3){
+  # Vectorized style: two steps, 1) mark rank first, 2) then judge whether it is top_n.
+  # Boundary issues are simplified and less prone to errors.
+  # 1) Mark rank first
+  mark <- 1
+  v.rank <- c(mark)
+  last <- v[1]
+  for (i in 2:length(v)){
+    if (v[i] == last) {
+      mark <- mark + 1
+    } else {
+      mark <- 1
+      last <- v[i]
+    }
+    v.rank[i] <- mark
+  }
+  # 2) Then judge whether it is top_n
+  v.is_top <- v.rank <= n
+  return(v.is_top)
+}
+#' to_multi_gene_list
+#'
+#' @param df
+#' @param group.col
+#' @param gene.col
+#' @param sep
+#' @param top_n For each group, only take the top n genes. Requires df to be sorted.
+#'
+#' @return
+#' @export
+#'
+#' @examples
+#' df1 <- to_multi_gene_list(cluster_markers, top_n=6)
+to_multi_gene_list <- function(df,
+                               group.col="cluster",
+                               gene.col="gene",
+                               sep=";",
+                               top_n=NULL){
+  df <- df[, c(group.col, gene.col)]
+  if (! is.null(top_n)){
+    df <- df[is_top_n(df[[group.col]], n=top_n), ]
+  }
+  colnames(df) <- c("group", "gene")
+  df <- aggregate(gene~group,
+                  FUN=function(x){paste(x, collapse=sep)},
+                  data=df)
+  colnames(df) <- c(group.col, gene.col)
+  return(df)
+}
+from_multi_gene_list <- function(df, group.col="cluster",
+                                 gene.col="gene", sep=";"){
+  df <- df[df[[gene.col]] != "", ]
+  df.list <- lapply(1:nrow(df), function(x){
+    gene.list <- df[x, gene.col]
+    gene.list <- strsplit(gene.list, sep)[[1]]
+    df1 <- cbind.data.frame(group=df[x, group.col], gene=gene.list)
+    return(df1)
+  })
+  out.df <- do.call(rbind.data.frame, df.list)
+  colnames(out.df) <- c(group.col, gene.col)
+  return(out.df)
+}
+#' batchPhyper2
+#'
+#' Investigate whether DEGs lists significantly overlap with each interested pathway.
+#'
+#' @param df1 Contains two columns: listName and geneList.
+#' @param df2 Contains two columns: gene and pathway.
+#' @param PopSize background gene number
+#'
+#' @return
+#' @export
+#'
+#' @examples
+batchPhyper2 <- function(df1, df2,
+                         group.col.1="listName",
+                         group.col.2="pathway",
+                         gene.col.1="geneList",
+                         gene.col.2="gene",
+                         show.genes=T,
+                         PopSize=20000){
+  clusters <- unique(df1[[group.col.1]])
+  names(clusters) <- clusters
+  out <- lapply(clusters, function(cluster){
+    marker_sets <- unique(df2[[group.col.2]])
+    names(marker_sets) <- marker_sets
+    sig.mark <- sapply(marker_sets, function(cell_type){
+      s1 <- df1[df1[[group.col.1]]==cluster, gene.col.1, drop=T]
+      s2 <- df2[df2[[group.col.2]]==cell_type, gene.col.2, drop=T]
+      overlap.genes <- intersect(s1, s2)
+      overlap <- length(overlap.genes)
+      list1 <- length(s1)
+      list2 <- length(s2)
+      p <- phyper(overlap-1,
+                  list1,
+                  PopSize-list1,
+                  list2,
+                  lower.tail = FALSE,
+                  log.p = FALSE)
+      p <- ifelse(p < 0.05, "*", "-")
+      cell.content <- paste0("(", p, ") ", overlap)
+      if (show.genes & length(overlap.genes) > 0) {
+        cell.content <- paste0(cell.content, ": ",
+                             paste(overlap.genes, collapse=";"))
+      }
+      return(cell.content)
+    })
+    return(sig.mark)
+  })
+  return(do.call(rbind, out))
+}
+# all DEGs
+for (log2fc in c(0.3)){
+  in.file <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                    log2fc, ".csv")
+  DEGs <- read.csv(in.file, row.names=1)
+  DEGs2 <- data.frame(listName=paste0(DEGs$comparison, ".",
+                                     DEGs$cellType, ".",
+                                     DEGs$direction),
+                     geneList=DEGs$geneList)
+ 
+  DEGs2 <- from_multi_gene_list(DEGs2, group.col="listName",
+                                   gene.col="geneList")
+ 
+ 
+  DEGs.tested <- batchPhyper2(DEGs2, interested_genes.df)
+  out.file <- paste0("001Giotto_out/003DEGs/wilcox/wilcox.each_cell.log2fc_",
+                     log2fc, ".hyper_tested.csv")
+  write.csv(DEGs.tested, out.file)
+}
+```
+
+**Results:**
+- [data/st/003/wilcox.each_cell.log2fc_0.3.hyper_tested.csv](data/st/003/wilcox.each_cell.log2fc_0.3.hyper_tested.csv): Hypergeometric test results between each DEGs list and the pathways of interest.
+
+## Other Analyses
+### Intersection with DEGs from ROSMAP and MSBB
+【Analysis】 Find the similarities and differences between DEGs lists identified in SC and ST and DEGs lists identified in ROSMAP and MSBB.
+
+```{r eval=FALSE}
+# Original script: ../check_SC_DEGs.r
+get_unique_genes <- function(x){
+  y <- paste(x, collapse=";")
+  y <- strsplit(y, ";")[[1]]
+  y <- setdiff(y, "")
+  return(unique(y))
+}
+count_unique_genes <- function(x){
+  y <- get_unique_genes(x)
+  return(length(y))
+}
+has_gene <- function(x, g){
+  y <- strsplit(x, ";")[[1]]
+  return (g %in% y)
+}
+test_intersect <- function(set1, set2, PopSize=20000){
+  out <- intersect(set1, set2)
+  overlap <- length(out)
+  list1 <- length(set1)
+  list2 <- length(set2)
+  p <- phyper(overlap-1, list1, PopSize-list1, list2, lower.tail = FALSE, log.p = FALSE)
+  return(p)
+}
+data <- read.csv("003two_seq_type/001DEG/DEG.final.csv", row.names=1)
+# Compare the difference in total number of up/down DEGs between SC and ST.
+data2 <- subset(data, method=="wilcoxon" & cellType != "all")
+# SC has more cell types and may list many DEGs repeatedly, so duplicates must be removed for comparison.
+out.wilcox <- aggregate(geneList~seqType+comparison, FUN=count_unique_genes, data=data2)
+data3 <- subset(data, method=="DESeq2" & cellType != "all")
+out.deseq2 <- aggregate(geneList~seqType+comparison, FUN=count_unique_genes, data=data3)
+# find overlap: Intersection of DEGs between SC and ST.
+for (M in c("wilcoxon", "DESeq2")){
+  for(D in c("up", "down")){
+    drug_effect.st <- subset(data, comparison=="PLX5622_vs_FADCtrl" &
+                                         method == M &
+                                         seqType=="ST" & direction==D,
+                                       select="geneList", drop=T)
+    drug_effect.sc <- subset(data, comparison=="PLX5622_vs_FADCtrl" &
+                                         method == M &
+                                         seqType=="SC" & direction==D,
+                                       select="geneList", drop=T)
+    drug_effect.st <- get_unique_genes(drug_effect.st)
+    drug_effect.sc <- get_unique_genes(drug_effect.sc)
+    out <- intersect(drug_effect.st, drug_effect.sc)
+    overlap <- length(out)
+    list1 <- length(drug_effect.st)
+    list2 <- length(drug_effect.sc)
+    PopSize <- 20000
+    p <- phyper(overlap-1,list1,PopSize-list1,list2,lower.tail = FALSE, log.p = FALSE)
+    cat("method: ", M, ";", "direction: ", D, "; pvalue: ", p, "\n")
+    print(out)
+    print("----------------")
+  }
+}
+search_gene <- function(g){
+  data[sapply(data$geneList, has_gene, g=g), 1:5]
+}
+search_gene("Apoe")
+# Find similarities and differences between DEGs lists identified in SC/ST and DEGs lists identified in ROSMAP/MSBB.
+library(homologene)
+# 246 rows, including duplicate genes. After removing duplicates, there are 149 genes. Among them, 110 genes can find homologous genes in mouse.
+rosmap.deg <- read.csv("000data/ROSMAP.DEGs.fdr_0.05_fc_1.2.tsv", sep="\t")
+homolo <- homologene(rosmap.deg$geneSymbol, inTax = 9606, outTax = 10090)
+length(unique(homolo$`9606`)) # 110
+homolo <- data.frame(geneSymbol=homolo$`9606`, geneSymbol.mouse=homolo$`10090`)
+rosmap.deg <- merge(rosmap.deg, homolo, by="geneSymbol")
+rosmap.AD_vs_NL.up <- unique(rosmap.deg[rosmap.deg$logFC > 0, "geneSymbol.mouse"])
+rosmap.AD_vs_NL.down <- unique(rosmap.deg[rosmap.deg$logFC < 0, "geneSymbol.mouse"])
+# find overlap: Intersection between DEGs identified in this study and DEGs identified in rosmap/msbb.
+out.list <- list()
+n <- 1
+for (M in c("wilcoxon", "DESeq2")){
+  for(D in c("up", "down")){
+    for (SeqType in c("ST", "SC")){
+      drug_effect <- subset(data, comparison=="PLX5622_vs_FADCtrl" &
+                                           method == M &
+                                           seqType==SeqType & direction==D,
+                                         select="geneList", drop=T)
+      drug_effect <- get_unique_genes(drug_effect)
+      if (D== "up") {
+        rosmap.set <- rosmap.AD_vs_NL.down
+      } else {
+        rosmap.set <- rosmap.AD_vs_NL.up
+      }
+      s <- intersect(drug_effect, rosmap.set)
+      p <- test_intersect(drug_effect, rosmap.set)
+      cat("SeqType: ", SeqType, "; method: ", M, "; direction: ", D, "; pvalue: ", p, "\n")
+      cat("geneList: ", s, "\n")
+      cat("----------------\n\n")
+      out.list[[n]] <- c(SeqType=SeqType, method=M, direction=D, pvalue=p, geneList=paste(s, collapse=";"))
+      n <- n + 1
+    }
+  }
+}
+out.df <- data.frame(do.call(rbind, out.list))
+write.csv(out.df, "003two_seq_type/001DEG/intersect_with_rosmap.csv")
+msbb.deg <- read.csv("000data/lmfit.DEGs.fdr_0.05_fc_1.2.tsv", sep="\t")
+homolo <- homologene(msbb.deg$Symbol, inTax = 9606, outTax = 10090)
+length(unique(msbb.deg$Symbol)) # 8725
+length(unique(homolo$`9606`)) # 4974
+homolo <- data.frame(Symbol=homolo$`9606`, geneSymbol.mouse=homolo$`10090`)
+msbb.deg <- merge(msbb.deg, homolo, by="Symbol")
+msbb.up <- unique(msbb.deg[msbb.deg$logFC > 0, "geneSymbol.mouse"])
+msbb.down <- unique(msbb.deg[msbb.deg$logFC < 0, "geneSymbol.mouse"])
+out.list <- list()
+n <- 1
+for (M in c("wilcoxon", "DESeq2")){
+  for(D in c("up", "down")){
+    for (SeqType in c("ST", "SC")){
+      drug_effect <- subset(data, comparison=="PLX5622_vs_FADCtrl" &
+                                           method == M &
+                                           seqType==SeqType & direction==D,
+                                         select="geneList", drop=T)
+      drug_effect <- get_unique_genes(drug_effect)
+      if (D== "up") {
+        gset <- msbb.down
+      } else {
+        gset <- msbb.up
+      }
+      s <- intersect(drug_effect, gset)
+      p <- test_intersect(drug_effect, gset)
+      cat("SeqType: ", SeqType, "; method: ", M, "; direction: ", D, "; pvalue: ", p, "\n")
+      cat("geneList: ", s, "\n")
+      cat("----------------\n\n")
+      out.list[[n]] <- c(SeqType=SeqType, method=M, direction=D,
+                         pvalue=p, nGenes=length(s), geneList=paste(s, collapse=";"))
+      n <- n + 1
+    }
+  }
+}
+out.df <- data.frame(do.call(rbind, out.list))
+write.csv(out.df, "003two_seq_type/001DEG/intersect_with_msbb.csv")
+```
+
+### Microglia Depletion Rate in Each Brain Region in Spatial Transcriptomics
+```{r}
+st.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
+micro.marker <- "C1qa"
+df <- subset(st.DEGs, gene == micro.marker & comparison=="PLX5622_vs_FADCtrl")
+df$depletion_rate <- 1 - 2^df$avg_log2FC
+mean(df$depletion_rate)
+# C1qa: 0.4016909
+# C1qb: 0.3956579
+# C1qc: 0.3615615
+# > df
+# p_val avg_log2FC pct.1 pct.2 p_val_adj brain_region
+# C1qa1 1.199030e-75 -0.5842970 0.662 0.864 2.224321e-71 Isocortex
+# C1qa3 3.097635e-46 -0.6263182 0.423 0.798 5.746423e-42 Hypothalamus
+# C1qa5 7.498844e-19 -0.8805762 0.497 0.721 1.391110e-14 Meninges
+# C1qa8 1.144687e-56 -0.9656266 0.448 0.774 2.123509e-52 Fiber tracts
+# C1qa10 1.455870e-23 -0.5205228 0.550 0.748 2.700785e-19 Cortical subplate
+# C1qa12 1.238540e-107 -0.9845902 0.685 0.970 2.297616e-103 Thalamus
+# C1qa15 9.939536e-07 -1.1480681 0.456 0.770 1.843883e-02 Lateral Ventricle
+# C1qa16 8.669477e-10 -0.6653558 0.338 0.800 1.608275e-05 Third Ventricle
+# C1qa18 1.401610e-48 -0.6198844 0.670 0.901 2.600127e-44 Olfactory area
+# C1qa20 1.603619e-17 -0.6005125 0.689 0.921 2.974874e-13 Striatum
+# C1qa22 7.141997e-49 -0.6968952 0.627 0.942 1.324912e-44 Hippocampus
+# comparison gene depletion_rate
+# C1qa1 PLX5622_vs_FADCtrl C1qa 0.3330258
+# C1qa3 PLX5622_vs_FADCtrl C1qa 0.3521724
+# C1qa5 PLX5622_vs_FADCtrl C1qa 0.4568495
+# C1qa8 PLX5622_vs_FADCtrl C1qa 0.4879440
+# C1qa10 PLX5622_vs_FADCtrl C1qa 0.3028808
+# C1qa12 PLX5622_vs_FADCtrl C1qa 0.4946307
+# C1qa15 PLX5622_vs_FADCtrl C1qa 0.5487709
+# C1qa16 PLX5622_vs_FADCtrl C1qa 0.3694668
+# C1qa18 PLX5622_vs_FADCtrl C1qa 0.3492769
+# C1qa20 PLX5622_vs_FADCtrl C1qa 0.3404804
+# C1qa22 PLX5622_vs_FADCtrl C1qa 0.3831016
+#-----------------------------------------------------------------------------
+# Do not use log2fc from FindMarkers.
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+st.seurat <- Giotto2Seurat(gobj)
+st.seurat$treatment_ct <- paste0(st.seurat$treatment, "_", st.seurat$cell_types)
+ 
+Idents(st.seurat) <- "treatment_ct"
+meta <- st.seurat@meta.data
+celltypes <- setdiff(unique(st.seurat$cell_types), "C12")
+qry <- "PLX5622"
+ref <- "FADCtrl"
+df.lfc.list <- list()
+for (br in celltypes) {
+  cells.1 <- row.names(meta)[meta$treatment_ct == paste0(qry, "_", br)]
+  cells.2 <- row.names(meta)[meta$treatment_ct == paste0(ref, "_", br)]
+  df.fc <- FoldChange(st.seurat@assays$RNA,
+                      cells.1=cells.1,
+                      cells.2=cells.2,
+                      features=c("C1qa", "Aif1", "Tmem119", "P2ry12", "Tyrobp", "Trem2"),
+                      norm.method="LogNormalize",
+                      pseudocount.use = 0)
+  df.fc$brain_region <- br
+  df.fc$gene <- row.names(df.fc)
+  df.lfc.list[[br]] <- df.fc
+}
+df.lfc <- Reduce(rbind, df.lfc.list)
+df.lfc$depletion_rate <- 1 - 2^df.lfc$avg_log2FC
+mean(df.lfc[df.lfc$gene == "C1qa", "depletion_rate"])
+# [1] 0.6161806
+sd(df.lfc[df.lfc$gene == "C1qa", "depletion_rate"])
+# [1] 0.08196494
+df.lfc.sub <- df.lfc[df.lfc$gene == "C1qa", ]
+df.lfc.sub[order(df.lfc.sub$depletion_rate), ]
+df.lfc.sub <- df.lfc[df.lfc$gene %in% c("Tmem119", "P2ry12"), ]
+mean(df.lfc.sub$depletion_rate) # 0.7286764
+sd(df.lfc.sub$depletion_rate) # 0.09242443
+df.lfc.sub <- df.lfc[df.lfc$gene %in% c("Tyrobp", "Trem2"), ]
+mean(df.lfc.sub$depletion_rate) # 0.5414908
+sd(df.lfc.sub$depletion_rate) # 0.0949244
+library(ggplot2)
+p <- ggplot(df.lfc, aes(brain_region, depletion_rate, fill=gene)) +
+  geom_bar(stat="identity", position = "dodge") +
+  coord_flip()
+ggsave("001Giotto_out/003DEGs/micro_depletion_rate.jpg", p)
+# Only plot C1qa
+df.lfc.sub <- df.lfc[df.lfc$gene == "C1qa", ]
+df.lfc.sub <- df.lfc.sub[order(df.lfc.sub$depletion_rate), ]
+df.lfc.sub$brain_region <- factor(df.lfc.sub$brain_region, levels=df.lfc.sub$brain_region, ordered=T)
+p <- ggplot(df.lfc.sub, aes(brain_region, depletion_rate)) +
+  geom_bar(stat="identity") +
+  coord_flip()
+ggsave("001Giotto_out/003DEGs/micro_depletion_rate.C1qa.jpg", p)
+# Plot DAM and HOM
+df.lfc.sub <- df.lfc[df.lfc$gene %in% c("Trem2", "Tmem119"), ]
+p <- ggplot(df.lfc.sub, aes(brain_region, depletion_rate, fill=gene)) +
+  geom_bar(stat="identity", position = "dodge") +
+  coord_flip()
+ggsave("001Giotto_out/003DEGs/micro_depletion_rate.DAM_HOM.jpg", p)
+```
+
+### Proportion of Microglia in Each Brain Region in Spatial Transcriptomics
+```{r}
+# Comparison of C1qa expression across different brain regions
+meta$C1qa <- as.vector(st.seurat@assays$RNA@data["C1qa", ])
+df <- aggregate(C1qa~treatment+cell_types, FUN=function(x){mean(expm1(x))}, data=meta)
+p <- ggplot(df, aes(cell_types, C1qa)) +
+  geom_bar(stat="identity") +
+  coord_flip() + facet_grid(.~treatment)
+ggsave("001Giotto_out/003DEGs/micro_br_expression.jpg", p, width=7, height=4)
+```
+
+### Differences in Depletion Rate Between Spots Far from and Close to Aβ (by Gene)
+```{r}
+# Do not use log2fc from FindMarkers.
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+st.seurat <- Giotto2Seurat(gobj)
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+all(meta$cell_ID == st.seurat$cell_ID)
+st.seurat$Abeta_index <- meta$Abeta_index
+st.seurat$P2ry12 <- meta$P2ry12
+st.seurat$Gfap <- meta$Gfap
+st.seurat$Abeta_HL <- ifelse(meta$Abeta_index > 10, "H", "L")
+st.seurat$treatment_ct <- paste0(st.seurat$treatment, "_", st.seurat$cell_types)
+ 
+Idents(st.seurat) <- "treatment_ct"
+celltypes <- setdiff(unique(st.seurat$cell_types), "C12")
+qry <- "PLX5622"
+ref <- "FADCtrl"
+df.lfc.list <- list()
+for (br in celltypes) {
+  for (HL in c("H", "L")) {
+    cells.1 <- row.names(st.seurat@meta.data)[st.seurat$treatment_ct == paste0(qry, "_", br) & st.seurat$Abeta_HL == HL]
+    cells.2 <- row.names(st.seurat@meta.data)[st.seurat$treatment_ct == paste0(ref, "_", br) & st.seurat$Abeta_HL == HL]
+    df.fc <- FoldChange(st.seurat@assays$RNA,
+                        cells.1=cells.1,
+                        cells.2=cells.2,
+                        features=c("C1qa", "Aif1", "Tmem119", "P2ry12", "Tyrobp", "Trem2", "Myo1e", "Igf1", "Fgf13", "Plxdc2", "Ctsd"),
+                        norm.method="LogNormalize",
+                        pseudocount.use = 0)
+    df.fc$brain_region <- br
+    df.fc$gene <- row.names(df.fc)
+    df.fc$Abeta_HL <- HL
+    df.lfc.list[[paste0(br, ".", HL)]] <- df.fc
+  }
+}
+df.lfc <- Reduce(rbind, df.lfc.list)
+df.lfc$depletion_rate <- 1 - 2^df.lfc$avg_log2FC
+write.csv(df.lfc, "001Giotto_out/010immunofluorescence/merged/Abeta_HL_region_depletion_rate.csv")
+```
+
+### Differences in Depletion Rate Between Spots Far from and Close to Aβ (by Deconvolution)
+```{r}
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+st.seurat <- Giotto2Seurat(gobj)
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+df.deconvo <- read.csv("001Giotto_out/cell2location/level2/spot.anno.prop.csv", row.names=1)
+row.names(df.deconvo) <- df.deconvo$cell.id
+df.deconvo <- df.deconvo[meta$cell_ID, ]
+all(meta$cell_ID == st.seurat$cell_ID)
+st.seurat$Abeta_index <- meta$Abeta_index
+st.seurat$Abeta_HL <- ifelse(meta$Abeta_index > 10, "H", "L")
+st.seurat$Micro_0_1 <- df.deconvo$Micro_0_1
+st.seurat$treatment_ct <- paste0(st.seurat$treatment, "_", st.seurat$cell_types)
+ 
+Idents(st.seurat) <- "treatment_ct"
+out.df <- aggregate(Micro_0_1 ~ treatment+cell_types+Abeta_HL, FUN=mean, data=st.seurat@meta.data)
+out.df.sub <- subset(out.df, treatment != "WTCtrl")
+library(reshape2)
+out.df.sub <- dcast(cell_types+Abeta_HL ~ treatment, value.var="Micro_0_1", data=out.df.sub)
+out.df.sub$depletion_rate <- (out.df.sub$FADCtrl - out.df.sub$PLX5622) / out.df.sub$FADCtrl
+write.csv(out.df.sub, "001Giotto_out/010immunofluorescence/merged/Abeta_HL_region_depletion_rate.deconvo.csv")
+```
+
+### Differences Between Spots Far from and Close to Aβ
+1. Load data. ok  
+2. Subset specific brain region.  
+3. Classify according to Aβ plaque area.  
+4. Differential expression analysis.
+
+```{r}
+setwd("/home/mouse_ad/001ST")
+gobj <- readRDS("001Giotto_out/testcombo.rds")
+st.seurat <- Giotto2Seurat(gobj)
+meta <- read.csv("001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+all(meta$cell_ID == st.seurat$cell_ID)
+st.seurat$Abeta_index <- meta$Abeta_index
+st.seurat$P2ry12 <- meta$P2ry12
+st.seurat$Gfap <- meta$Gfap
+Idents(st.seurat) <- "cell_types"
+st.seurat.sub <- subset(st.seurat, ident="Olfactory area")
+```

@@ -1,0 +1,492 @@
+# SC Data Filtering and Integration
+
+# Using filter count
+Includes data loading, data filtering based on nFeature and percent.mt, doublet filtering, integration, and clustering.
+
+## Data Paths
+```{r}
+
+library("Seurat")
+library("ggplot2")
+
+setwd("/home/mouse_ad/002SC")
+
+dir.create("004Seurat_out")
+outbase <- "004Seurat_out"
+
+# create output directory if not exists.
+outdir <- file.path(outbase, "001filter_and_integrate")
+
+if (! file.exists(outdir)){
+  dir.create(outdir)
+}
+
+# Load data and convert to Seurat objects.
+
+# read data
+data.list <- list()
+
+#-----------#
+# read data #
+#-----------#
+data.path <- list(
+  WT_ctrl.1 = "000data/batch1/KYSY-7672-221034-01/WT_ctrl/filtered_feature_bc_matrix",
+  WT_ctrl.2 = "000data/batch2/KYSY-8399-Cellranger/221034B_WT_ctrl/outs/filtered_feature_bc_matrix/",
+  WT_ctrl.3 = "000data/batch3/KYSY-9307-221034-03/result/WT_CTRL/2.Basic_analysis/2.2.filtered_feature_bc_matrix",
+  AD_ctrl.1 = "000data/batch1/KYSY-7672-221034-01/AD_ctrl/filtered_feature_bc_matrix",
+  AD_ctrl.2 = "000data/batch2/KYSY-8399-Cellranger/221034B_AD_ctrl/outs/filtered_feature_bc_matrix/",
+  AD_5622.1 = "000data/batch1/KYSY-7672-221034-01/AD_5622/filtered_feature_bc_matrix",
+  AD_5622.2 = "000data/batch2/KYSY-8399-Cellranger/221034B_AD_5622/outs/filtered_feature_bc_matrix/", 
+  WT_ctrl.4 = "000data/batch4/KYSY-11001_221034/result/WT_ctrl/2.Basic_analysis/2.2.filtered_feature_bc_matrix/", 
+  AD_ctrl.4 = "000data/batch4/KYSY-11001_221034/result/AD_ctrl/2.Basic_analysis/2.2.filtered_feature_bc_matrix/", 
+  AD_5622.4 = "000data/batch4/KYSY-11001_221034/result/AD_5622/2.Basic_analysis/2.2.filtered_feature_bc_matrix/"
+)
+```
+
+## Basic Filtering
+
+### Explore data distribution and determine filtering criteria
+
+```{r}
+
+# dhlab
+dir.create("004Seurat_out/001filter_and_integrate/raw_meta")
+
+for (sample in names(data.path)) {
+  cat("sample: ", sample, "\n")
+  sample.path <- data.path[[sample]]
+  sample.matrix <- Read10X(data.dir=sample.path)
+  sobj <- CreateSeuratObject(counts = sample.matrix, 
+                          project = sample, 
+                          min.cells = 3, 
+                          min.features = 200)
+  sobj[["percent.mt"]] <- PercentageFeatureSet(sobj, pattern="^mt-")
+  write.csv(sobj@meta.data, paste0("004Seurat_out/001filter_and_integrate/raw_meta/", sample, ".csv"))
+}
+
+meta.list <- list()
+for (sample in names(data.path)) {
+  df <- read.csv(paste0("004Seurat_out/001filter_and_integrate/raw_meta/", sample, ".csv"), row.names=1)
+  df$cell_ID <- paste0(df$orig.ident, "-", row.names(df))
+  meta.list[[sample]] <- df
+}
+
+meta <- Reduce(rbind, meta.list)
+
+write.csv(meta, "004Seurat_out/001filter_and_integrate/raw_meta/raw_meta.merged.csv")
+
+# thinkpad
+# workdir: C:/Users/a8799/Desktop/project/2022-10-14_mouse_spatial/PLX5622
+
+meta <- read.csv("../002SC/004Seurat_out/001filter_and_integrate/raw_meta/raw_meta.merged.csv", row.names=1)
+
+library(ggplot2)
+
+meta$orig.ident <- factor(meta$orig.ident, levels=c("WT_ctrl.1", "AD_ctrl.1", "AD_5622.1",
+                                                    "WT_ctrl.2", "AD_ctrl.2", "AD_5622.2", 
+                                                    "WT_ctrl.4", "AD_ctrl.4", "AD_5622.4",
+                                                    "WT_ctrl.3"), ordered=T)
+
+# nCount_RNA
+ggplot(meta, aes(orig.ident, nCount_RNA)) + 
+  geom_boxplot() + coord_cartesian(ylim = c(0, 30000))
+# Some sample medians reach 15,000
+
+ggplot(meta, aes(x=nCount_RNA)) + 
+         geom_density() + coord_cartesian(xlim=c(0, 30000)) + 
+  facet_wrap(.~orig.ident, ncol=3)
+# nCount_RNA has obvious bimodal distribution. Unsure if due to doublets or different cell types.
+# Density curves vary significantly between batches.
+       
+# nFeature_RNA
+ggplot(meta, aes(orig.ident, nFeature_RNA)) + geom_boxplot()
+# Median peaks around 5,000
+
+ggplot(meta, aes(orig.ident, nFeature_RNA)) + 
+  geom_boxplot() + coord_cartesian(ylim = c(0, 2000)) # Look at lower bound
+
+ggplot(meta, aes(x=nFeature_RNA)) + 
+         geom_density() + coord_cartesian(xlim=c(0, 10000)) + 
+  facet_wrap(.~orig.ident, ncol=3)
+# Clear bimodal distribution. 8,000 seems appropriate.
+
+
+# percent.mt < 1 for the vast majority of cells. Setting a 5% threshold is appropriate.
+# p1 <- ggplot(meta, aes(orig.ident, percent.mt)) + geom_boxplot()
+ggplot(meta, aes(orig.ident, percent.mt)) + geom_boxplot() + coord_cartesian(ylim=c(0, 5))
+
+# Is mitochondrial proportion unimodal?
+ggplot(subset(meta, orig.ident == "WT_ctrl.1"), aes(y=percent.mt)) + geom_histogram()
+
+ggplot(meta, aes(x=percent.mt)) + geom_density() + xlim(c(0, 1))
+
+table(meta$percent.mt < 3) # 66 items
+
+table(meta$nFeature_RNA < 8000) # 750 items
+
+# Determine criteria:
+nFeature_RNA.cutoff > 500
+nFeature_RNA.cutoff < 8000
+percent.mt.cutoff <- 3
+```
+
+### Perform Filtering
+
+```{r}
+
+dir.create("004Seurat_out/001filter_and_integrate/naive_filter")
+
+for (sample in names(data.path)) {
+  cat("sample: ", sample, "\n")
+  sample.path <- data.path[[sample]]
+  sample.matrix <- Read10X(data.dir=sample.path)
+  sobj <- CreateSeuratObject(counts = sample.matrix, 
+                          project = sample, 
+                          min.cells = 3, 
+                          min.features = 200)
+  sobj[["percent.mt"]] <- PercentageFeatureSet(sobj, pattern="^mt-")
+  sobj.sub <- subset(sobj, subset = nFeature_RNA > 500 & 
+                nFeature_RNA < 8000 & 
+                percent.mt  < 3)
+  saveRDS(sobj.sub, paste0("004Seurat_out/001filter_and_integrate/naive_filter/", sample, ".rds"))
+}
+
+```
+
+
+## Remove Ambient RNA
+
+```{r}
+# BiocManager::install("decontX") # Failed
+# remotes::install_github("campbio/decontX") # Failed
+
+# Use the environment from the previous adp1 project.
+# conda activate decontX
+
+setwd("/storage/lch/project/2022-10-14_mouse_spatial/002SC")
+
+library(decontX)
+library(Seurat) # v5 in this environment.
+
+dir.create("004Seurat_out/001filter_and_integrate/decontx")
+
+samples <- c("WT_ctrl.1","WT_ctrl.2","WT_ctrl.3","AD_ctrl.1","AD_ctrl.2",
+             "AD_5622.1","AD_5622.2","WT_ctrl.4","AD_ctrl.4","AD_5622.4")
+
+for (sample in samples) {
+  cat("sample: ", sample, "\n")
+  sobj <- readRDS(paste0("004Seurat_out/001filter_and_integrate/naive_filter/", sample, ".rds"))
+  # Checked, format is correct.
+  d1 <- decontX(sobj@assays$RNA@counts)
+  saveRDS(d1, paste0("004Seurat_out/001filter_and_integrate/decontx/", sample, ".rds"))
+}
+
+```
+
+### Statistics of Ambient RNA
+
+```{r}
+# dhlab
+sobj.meta <- read.csv("002SC/004Seurat_out/002cell_type_anno/sobj.meta.csv", row.names=1)
+
+contamination.all <- c()
+for (sample.name in unique(sobj.meta$orig.ident)) {
+  cat(sample.name, "\n")
+  sobj.1 <- readRDS(paste0("002SC/004Seurat_out/001filter_and_integrate/decontx/", sample.name, ".rds"))
+  contamination <- sobj.1$estimates$all_cells$contamination
+  names(contamination) <- paste0(sample.name, "_", names(contamination))
+  contamination.all <- c(contamination.all, contamination)
+}
+
+sobj.meta$ambientRNA <- contamination.all[row.names(sobj.meta)]
+
+write.csv(sobj.meta, "002SC/004Seurat_out/002cell_type_anno/sobj.meta.ambient.csv")
+```
+
+
+### Statistics of Genes Constituting Ambient RNA
+
+```{r}
+
+# dhlab
+samples <- c("WT_ctrl.1","WT_ctrl.2","WT_ctrl.3","AD_ctrl.1","AD_ctrl.2",
+             "AD_5622.1","AD_5622.2","WT_ctrl.4","AD_ctrl.4","AD_5622.4")
+
+collector <- list()
+for (sample in samples) {
+  cat("sample: ", sample, "\n")
+  sobj <- readRDS(paste0("004Seurat_out/001filter_and_integrate/naive_filter/", sample, ".rds"))
+  result <- readRDS(paste0("004Seurat_out/001filter_and_integrate/decontx/", sample, ".rds"))
+  
+  ambient.count <- sobj@assays$RNA@counts - result$decontXcounts
+  ambient.count.rowSums <- rowSums(ambient.count)
+  collector[[sample]] <- ambient.count.rowSums
+}
+
+# Use Reduce and merge for cyclic merging
+
+for (s in names(collector)) {
+  vec <- collector[[s]]
+  df <- data.frame(gene=names(vec), count=vec)
+  names(df) <- c("gene", s)
+  collector[[s]] <- df
+}
+
+df2 <- Reduce(function(x, y) {merge(x, y, by="gene", all=T)}, collector)
+df2[is.na(df2)] <- 0
+
+row.names(df2) <- df2$gene
+df2$gene <- NULL
+
+write.csv(df2, "004Seurat_out/001filter_and_integrate/decontx/ambient_count.csv")
+
+# thinkpad
+ambient_count <- read.csv("../002SC/004Seurat_out/001filter_and_integrate/decontx/ambient_count.csv", row.names=1)
+
+boxplot(ambient_count)
+
+ambient.genes.list <- list()
+for (s in colnames(ambient_count)) {
+  x <- boxplot(ambient_count[[s]])
+  ambient.genes <- row.names(ambient_count)[ambient_count[[s]] > x$stats[5, 1]]
+  ambient.genes.list[[s]] <- ambient.genes
+}
+
+lapply(ambient.genes.list, length)
+
+length(Reduce(intersect, ambient.genes.list)) # [1] 2352
+length(unique(unlist(ambient.genes.list))) # [1] 3760
+
+ambient.genes <- unique(unlist(ambient.genes.list))
+
+writeLines(ambient.genes, "../002SC/004Seurat_out/001filter_and_integrate/decontx/ambient.genes.list")
+
+# Top 5 ambient genes for each sample:
+genes <- row.names(ambient_count)
+for (s in samples) {
+  top5 <- head(genes[order(ambient_count[[s]], decreasing = T)], 5)
+  cat(s, ": ", top5, "\n")
+}
+
+ambient_count.rowSums <- sort(rowSums(ambient_count), decreasing = T)
+
+head(ambient_count.rowSums, 20)
+
+# Gene set accounting for 95% of ambient source:
+ambient_count.rowSums.cumsum <- cumsum(ambient_count.rowSums) / sum(ambient_count.rowSums)
+
+length(ambient_count.rowSums.cumsum[ambient_count.rowSums.cumsum < 0.5]) # 684
+
+  # Mitochondrial RNA has little effect on ambient RNA. Neuronal genes are mainly affected.
+ambient_count.rowSums.cumsum[grepl("^mt-", names(ambient_count.rowSums.cumsum))]
+#    mt-Co3    mt-Co1   mt-Atp6    mt-Co2   mt-Cytb    mt-Nd2    mt-Nd4    mt-Nd1    mt-Nd5    mt-Nd3   mt-Nd4l   mt-Atp8    mt-Nd6 
+# 0.8009375 0.8554724 0.8720010 0.8764466 0.9132079 0.9445560 0.9487192 0.9504872 0.9898348 0.9918414 0.9963237 0.9983611 0.9991917 
+
+ambient_count.rowSums.cumsum[grepl("^Ndufs", names(ambient_count.rowSums.cumsum))]
+#    Ndufs4    Ndufs1    Ndufs3    Ndufs2    Ndufs5    Ndufs7    Ndufs8    Ndufs6 
+# 0.6703147 0.7572406 0.8650144 0.9243524 0.9247903 0.9301441 0.9758531 0.9870930
+
+df <- data.frame(gene=names(ambient_count.rowSums.cumsum), cum_ratio=ambient_count.rowSums.cumsum)
+df$rank <- 1:nrow(df)
+
+write.csv(df, "../002SC/004Seurat_out/001filter_and_integrate/decontx/gene.rank_by_ambient.csv")
+
+df.sub <- subset(df, grepl("^mt-", df$gene))
+
+library(ggrepel)
+
+ggplot(df, aes(rank, cum_ratio)) + geom_line(aes(group=1)) + 
+  labs(x="rank of genes (order by ambient count)", y="Cumulative ratio") + 
+  geom_point(data=df.sub) + 
+  # geom_text(data=df.sub, aes(label=gene)) + 
+  geom_text_repel(data=df.sub, aes(label=gene)) + 
+  theme(axis.text.x=element_blank())
+
+```
+
+
+## Remove doublets: doubletFinder
+
+```{r}
+
+library("DoubletFinder")
+library("dplyr")
+
+data.list <- list()
+for (sample in names(data.path)) {
+  d <- readRDS(paste0("004Seurat_out/001filter_and_integrate/decontx/", sample, ".rds"))
+  sobj <- CreateSeuratObject(counts = d$decontXcounts, 
+                          project = sample, 
+                          min.cells = 3, 
+                          min.features = 200)
+  data.list[[sample]] <- sobj
+}
+
+
+data.list <- lapply(data.list, function(x){
+    NormalizeData(x) %>% FindVariableFeatures() %>%
+    ScaleData() %>% RunPCA() %>% JackStraw() %>%
+    ScoreJackStraw()
+})
+
+# Temporarily manually select a PC value, adjust later if time permits.
+picked.dim <- 30
+
+# clusters help with homotypic doublets, UMAP helps with plotting.
+data.list <- lapply(data.list, function(x){
+  FindNeighbors(x, dims = 1:picked.dim) %>%
+  FindClusters(.,resolution = 0.3) %>%
+  RunUMAP(., dims = 1:picked.dim)
+})
+
+for (i in names(data.list)){
+  x <- data.list[[i]]
+  
+  ## Estimate pK (no ground-truth)           
+  sweep.x <- paramSweep_v3(x, PCs = 1:10, sct = FALSE)
+  sweep.stats_x <- summarizeSweep(sweep.x, GT = FALSE)
+  bcmvn_x <- find.pK(sweep.stats_x)
+  # Select pK that maximizes BCmetric, ref: https://rpubs.com/kenneditodd/doublet_finder_example
+  bcmvn.max <- bcmvn_x[which.max(bcmvn_x$BCmetric),]
+  optimal.pk <- bcmvn.max$pK
+  optimal.pk <- as.numeric(levels(optimal.pk))[optimal.pk]
+  
+  # Estimate nExp.poi.adj
+  annotations <- x@meta.data$seurat_clusters
+  homotypic.prop <- modelHomotypic(annotations) 
+  nExp.poi <- round(optimal.pk * nrow(x@meta.data)) 
+  ## Assuming 7.5% doublet formation rate - tailor for your dataset
+  nExp.poi.adj <- round(nExp.poi * (1 - homotypic.prop))
+  
+  x <- doubletFinder_v3(x, PCs = 1:picked.dim, pN = 0.25,
+                pK = optimal.pk, nExp = nExp.poi.adj, 
+                reuse.pANN = FALSE, sct = FALSE)
+  
+  DF.name <- paste0("DF.classifications_0.25_", optimal.pk, "_", nExp.poi.adj)
+  
+  # Statistics results
+  outdir.doublet <- file.path(outdir, "doublet")
+  if (!file.exists(outdir.doublet)) dir.create(outdir.doublet)
+  write.csv(x@meta.data, file.path(outdir.doublet, paste0("doublet.", i, ".csv")))
+  
+  # Select singlets
+  x = x[, x@meta.data[, DF.name] == "Singlet"] ##Extract all singlet
+  data.list[[i]] <- x
+}
+
+saveRDS(data.list, "004Seurat_out/001filter_and_integrate/sobj.list.rds")
+
+
+```
+
+## Statistics of Filtering Results
+
+Statistical indicators:
+1. Basic filtering: cell count.
+2. Ambient RNA: average ambient RNA proportion.
+3. Doublet: cell count.
+
+```{r}
+# env: dhlab
+
+# 0. Raw data volume
+meta <- read.csv("004Seurat_out/001filter_and_integrate/raw_meta/raw_meta.merged.csv", row.names=1)
+df <- table(meta$orig.ident)
+raw_count <- df[names(data.list)]
+
+# AD_5622.1 AD_5622.2 AD_5622.4 AD_ctrl.1 AD_ctrl.2 AD_ctrl.4 WT_ctrl.1 WT_ctrl.2 WT_ctrl.3 WT_ctrl.4 
+#      2450      4834      3287      2638      5671     11690      2436      1594      8034      5101
+
+# 1. Basic filtering
+ncell.after_naive <- c()
+ambient.ratio <- c()
+
+for (sample in names(data.list)) {
+  sobj <- readRDS(paste0("004Seurat_out/001filter_and_integrate/decontx/", sample, ".rds"))
+  ncell.after_naive[sample] <- ncol(sobj$decontXcounts)
+  ambient.ratio[sample] <- mean(sobj$contamination) # 2. ambient RNA
+}
+
+# 3. Doublet
+ncell.after_doublet <- sapply(data.list, ncol)[names(data.list)]
+
+df.quality_control <- cbind(raw_count, ncell.after_naive, ambient.ratio, ncell.after_doublet)
+
+write.csv(df.quality_control, "004Seurat_out/001filter_and_integrate/df.quality_control.csv")
+```
+
+
+## Integration and Clustering
+
+```{r}
+samples <- names(data.list)
+
+data.list <- lapply(samples, function(x){
+  x <- data.list[[x]]
+  x@meta.data <- x@meta.data[, c("orig.ident","nCount_RNA", "nFeature_RNA")]
+  return(x)
+  })
+
+names(data.list) <- samples
+
+data.merged <- merge(data.list[[1]], y = c(data.list[[2]], data.list[[3]], data.list[[4]],
+                                           data.list[[5]], data.list[[6]], data.list[[7]], 
+                                           data.list[[8]], data.list[[9]], data.list[[10]]),
+                     add.cell.ids = samples, project = "PLX5622")
+
+data.merged <- FindVariableFeatures(data.merged, selection.method = "vst", nfeatures = 2000)
+
+data.merged <- ScaleData(data.merged, verbose = FALSE) %>%
+                   RunPCA(npcs=30) %>% RunUMAP(dims=1:30) %>%
+                   FindNeighbors(dims=1:30)
+
+data.merged$treatment <- sapply(strsplit(as.character(data.merged$orig.ident), ".", fixed = T), "[", 1)
+data.merged$batch <- sapply(strsplit(as.character(data.merged$orig.ident), ".", fixed = T), "[", 2)
+
+library(harmony)
+
+data.merged <- RunHarmony(data.merged, group.by.vars=c("orig.ident"), assay.use = "RNA") # If "batch" is added, batch will be ignored.
+
+data.merged <- RunUMAP(data.merged, dims=1:30, reduction="harmony")
+
+data.merged <- FindNeighbors(data.merged, reduction = "harmony", dims = 1:30)
+data.merged <- FindClusters(data.merged, resolution = 0.3)
+
+saveRDS(data.merged, "004Seurat_out/001filter_and_integrate/sobj.rds")
+
+data.merged@meta.data <- cbind(data.merged@meta.data, data.merged@reductions$umap@cell.embeddings)
+
+write.csv(data.merged@meta.data, "004Seurat_out/001filter_and_integrate/sobj.meta.csv")
+```
+
+## plot
+
+### UMAP
+
+```{r}
+# thinkpad
+
+library(ggplot2)
+library(patchwork)
+
+sobj.meta <- read.csv("../002SC/004Seurat_out/001filter_and_integrate/sobj.meta.csv", row.names=1)
+
+sobj.meta$treatment <- factor(sobj.meta$treatment, levels=c("WT_ctrl", "AD_ctrl", "AD_5622"), ordered=T)
+sobj.meta$batch <- factor(sobj.meta$batch)
+sobj.meta$seurat_clusters <- factor(sobj.meta$seurat_clusters)
+
+p1 <- DimPlot(sobj, reduction = "umap", group.by = "batch", label=T, combine=F)
+ggsave("../002SC/004Seurat_out/001filter_and_integrate/umap.batch.png", p1, width=10, height=8, dpi=300)
+
+p1 <- DimPlot(sobj, reduction = "umap", group.by = "treatment", label=T, combine=F)
+ggsave("../002SC/004Seurat_out/001filter_and_integrate/umap.treatment.png", p1, width=10, height=8, dpi=300)
+
+p1 <- DimPlot(sobj, reduction = "umap", group.by = "seurat_clusters", label=T, combine=F)
+ggsave("004Seurat_out/001filter_and_integrate/umap.cluster.png", p1, width=10, height=8, dpi=300)
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/001filter_and_integrate/umap.batch.png")
+knitr::include_graphics("../002SC/004Seurat_out/001filter_and_integrate/umap.treatment.png")
+knitr::include_graphics("../002SC/004Seurat_out/001filter_and_integrate/umap.cluster.png")
+```

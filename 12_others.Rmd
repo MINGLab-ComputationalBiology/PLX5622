@@ -1,0 +1,986 @@
+# Other Analyses
+
+## Validation in Human SN Data
+
+Two datasets:  
+PFC 427 (syn52293433) and 48 samples from six brain regions (syn52383412).
+
+Reference:  
+"C:\Users\a8799\Desktop\project\2022-10-14_mouse_spatial\subprojects\2024-10-10_人和小鼠比较shijia\shijia_5622\人和小鼠比较.pptx"
+
+Related data:  
+C:\Users\a8799\Desktop\database\rosmap_PFC_SN\
+
+Plotting script provided by Shijia:  
+"C:\Users\a8799\Desktop\database\rosmap_PFC_SN\analysis.Rmd"
+
+### Processing Metadata
+
+```{r}
+# shaolab-1
+# Load required R packages
+library(Seurat)
+library(dplyr)
+
+# 1. Define the list of files
+file_list <- c(
+  "Microglia.rds",
+  "OPCs.rds",
+  "Oligodendrocytes.rds",
+  "Inhibitory_neurons.rds",
+  "Immune_cells.rds",
+  "Excitatory_neurons_set1.rds",
+  "Excitatory_neurons_set2.rds",
+  "Excitatory_neurons_set3.rds",
+  "Astrocytes.rds"
+)
+
+# 2. Create an empty list to store metadata from each file
+metadata_list <- list()
+
+# 3. Loop through each file and extract metadata
+for (i in seq_along(file_list)) {
+  current_file <- file_list[i]
+  cat("Processing file (", i, "/", length(file_list), "): ", current_file, "\n", sep="")
+ 
+  # Use tryCatch for error handling to prevent a single file error from stopping the entire script
+  result <- tryCatch({
+    # Read Seurat object
+    seu_obj <- readRDS(current_file)
+   
+    # Extract metadata (usually stored in @meta.data slot for Seurat objects)
+    meta_df <- seu_obj@meta.data
+   
+    # Optional but recommended: add a column to record the source file/cell type for traceability
+    # Use the filename (without .rds suffix) as the cell type identifier
+    cell_type_identifier <- gsub(".rds", "", current_file)
+    meta_df$original_file <- cell_type_identifier
+   
+    # Store current file's metadata in the list
+    metadata_list[[i]] <- meta_df
+   
+    # Remove Seurat object from memory to free up space (important!)
+    rm(seu_obj)
+    gc() # Recommend garbage collection, especially for large files
+   
+    cat(" Successfully read, total ", nrow(meta_df), " cells.\n")
+    NULL # Return NULL on success
+  }, error = function(e) {
+    # If an error occurs, print the error message and store NULL in the list
+    cat(" Error processing file: ", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# 4. Combine all metadata
+cat("Merging all metadata...\n")
+# Use bind_rows from dplyr, which intelligently handles columns with different names (missing columns filled with NA)
+combined_metadata <- bind_rows(metadata_list)
+
+# 5. Check the merging result
+cat("Merging completed!\n")
+cat("Total number of cells: ", nrow(combined_metadata), "\n")
+cat("Total number of columns (variables): ", ncol(combined_metadata), "\n")
+cat("Column names: ", paste(colnames(combined_metadata), collapse = ", "), "\n")
+
+# 6. View the first few rows of the merged data frame
+print(head(combined_metadata, n = 3))
+
+pseudo.meta <- readRDS("PF427.pseudobulk.meta.rds") # Retrieve disease-related information
+
+# Ensure this column matches exactly
+length(intersect(unique(pseudo.meta$orig.ident), combined_metadata$projid)) == length(unique(combined_metadata$projid))
+
+# Merge based on this column
+interested.cols <- setdiff(colnames(pseudo.meta), colnames(combined_metadata))
+pseudo.meta.sub <- pseudo.meta[!duplicated(pseudo.meta$orig.ident), ]
+combined_metadata2 <- combined_metadata %>%
+  left_join(pseudo.meta.sub[, c("orig.ident", interested.cols)], by = join_by(projid == orig.ident))
+
+# 7. Save the merged metadata as RDS and CSV files (optional)
+# Save as RDS (preserves R object format for fast reloading later)
+saveRDS(combined_metadata2, file = "~/project/2022-10-14_mouse_spatial/combined_metadata_ROSMAP_427_SN.rds")
+cat("Saved as combined_metadata.rds\n")
+
+# Copy combined_metadata_ROSMAP_427_SN.rds to thinkpad.
+
+# thinkpad
+combined_metadata2 <- readRDS("../subprojects/2024-10-10_人和小鼠比较shijia/v1/combined_metadata_ROSMAP_427_SN.rds")
+combined_metadata2$Annotation <- sub(" .*$", "", combined_metadata2$cell_type_high_resolution)
+meta.agg <- combined_metadata2 %>% group_by(projid, Annotation) %>% summarise(nCell=n())
+meta.agg_by_proj <- combined_metadata2 %>% group_by(projid) %>% summarise(nCell=n())
+meta.agg2 <- merge(meta.agg, meta.agg_by_proj, by="projid", suffixes=c(".ct", ".prj"))
+meta.agg2$Prop <- meta.agg2$nCell.ct / meta.agg2$nCell.prj
+prj.info <- combined_metadata2[!duplicated(combined_metadata2$projid), ]
+meta.agg3 <- merge(meta.agg2, prj.info, by="projid")
+CT <- "Inh"
+# CT <- "Mic"
+meta.agg3.sub <- subset(meta.agg3, Annotation.x == CT)
+p1 <- ggplot(meta.agg3.sub, aes(as.character(Cerad), Prop)) + geom_boxplot() + labs(title=paste0(CT, " proportion"))
+p2 <- ggplot(meta.agg3.sub, aes(as.character(Braak), Prop)) + geom_boxplot() + labs(title=paste0(CT, " proportion"))
+p3 <- ggplot(meta.agg3.sub, aes(as.character(Cogdx), Prop)) + geom_boxplot() + labs(title=paste0(CT, " proportion"))
+p1 | p2 |p3
+```
+
+### Load Packages and Inspect Data
+
+```{r}
+# Load required libraries
+# pak::pkg_install("lmerTest")
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lme4)        # Mixed effects models
+library(lmerTest)    # Provides p-values
+library(car)         # Variance inflation factor (VIF)
+library(ggpubr)      # Statistical visualization
+
+data <- meta.agg3.sub
+
+# Check data structure
+str(data)
+summary(data)
+
+data$Apoe <- as.factor(data$Apoe)
+data$Age <- sub("90+", "90", data$Age, fixed = T)
+data$Age <- as.numeric(data$Age)
+
+# Check Prop distribution (proportion data should be between 0-1)
+hist(data$Prop, breaks=30, main="Distribution of GABAergic neuron proportion")
+boxplot(Prop ~ Cogdx, data=data, main="Proportion distribution by cognitive diagnosis")
+
+# Check distribution of key categorical variables
+table(data$Cogdx)
+# 1 2 3 4 5 6
+# 146 101 8 142 15 11
+
+table(data$Diagnosis) # If you have a clear AD/Control grouping column
+# Not_Available
+# 423
+
+table(data$Apoe)
+ # 22 23 24 33 34 44
+ # 3 54 9 251 96 8
+
+table(data$Braak) # 6 = severe
+  # 0 1 2 3 4 5 6
+  # 7 42 65 105 93 102 9
+
+table(data$Cerad) # 1 = definite
+# 1 2 3 4
+# 123 126 42 132
+```
+
+### Preliminary Group Comparison of Inh Proportion
+
+```{r}
+# Method 2: Define groups using stricter pathological criteria
+# Require both: Braak >= IV & Cerad <= 2
+data$Group <- ifelse(data$Braak >= 4 & data$Cerad <= 2,
+                                 "AD", "Normal")
+
+# Check group sizes
+table(data$Group)
+# AD_pathology Non_AD
+# 178 245
+
+prop.table(table(data$Group)) * 100
+
+# Boxplot + jitter plot (showing data distribution)
+p <- ggplot(data, aes(x=Group, y=Prop, fill=Group)) +
+  geom_boxplot(alpha=0.6, outlier.shape=NA) +
+  geom_jitter(width=0.2, size=.8, alpha=.6) +
+  labs(y="GABA proportion") +
+  stat_compare_means(method="wilcox", label="p.format", comparisons = list(c("AD", "Normal"))) +
+  theme_nature() + theme(plot.title=element_blank(), axis.title.x=element_blank())
+ 
+ggsave("../subprojects/2024-10-10_人和小鼠比较shijia/GABA_proportion.ROSMAP.pdf",
+       p, width=2.424, height=2.513, device=cairo_pdf)
+
+# Stratified analysis by sex
+ggplot(data, aes(x=Group, y=Prop)) +
+  geom_boxplot(aes(fill=Gender), alpha=0.6, outlier.shape=NA) +
+  geom_jitter(width=0.2, alpha=0.4, size=1.5) +
+  labs(title="GABA Proportion: AD vs Normal",
+       y="GABAergic neuron proportion", x="") +
+  facet_wrap(~Gender) +
+  stat_compare_means(method="wilcox", label="p.format",
+                     comparisons = list(c("AD_pathology", "Non_AD"))) +
+  labs(title="") + theme_classic()
+
+ggplot(data, aes(x=Gender, y=PMI)) + geom_boxplot()
+```
+
+### Statistical Modeling for Inh Proportion Comparison
+
+```{r}
+# Model 1: Simple t-test (no covariates)
+t_test_result <- t.test(Prop ~ Group, data=data)
+print(t_test_result)
+
+# Model 2: Simple linear regression (Group effect only)
+lm_simple <- lm(Prop ~ Group, data=data)
+summary(lm_simple)
+
+lm_demo <- lm(Prop ~ Group + Gender, data=data)
+summary(lm_demo)
+
+lm_demo <- lm(Prop ~ Group + Age, data=data)
+summary(lm_demo)
+
+# Model 3: Controlling for demographic variables (age, sex)
+lm_demo <- lm(Prop ~ Group + Age + Gender, data=data)
+summary(lm_demo)
+
+# Model 4: Controlling for all major covariates (recommended)
+# Note: Braak and Cerad are AD pathological indicators; use with caution
+full_model <- lm(Prop ~ Group + Age + Gender + Apoe + PMI,
+                 data=data)
+summary(full_model)
+
+# Model 5: Treat Braak stage as an ordered factor (if needed)
+data$Braak_factor <- factor(data$Braak, ordered=TRUE)
+model_braak <- lm(Prop ~ Braak_factor + Age + Gender + Apoe + PMI,
+                  data=data)
+summary(model_braak)
+```
+
+### Modify AD Group Definition
+
+```{r}
+data$Group <- "Mild"
+data$Group[data$Braak >= 3 & data$Braak <= 4] <- "Moderate"
+data$Group[data$Braak >= 5] <- "Severe"
+
+ggplot(data, aes(x=Group, y=Prop, fill=Group)) +
+  geom_boxplot(alpha=0.6, outlier.shape=NA) +
+  geom_jitter(width=0.2, alpha=0.4, size=1.5) +
+  labs(title="GABA Proportion: AD vs Normal",
+       y="GABAergic neuron proportion", x="") +
+  theme_classic() +
+  stat_compare_means(method="wilcox", label="p.format", comparisons = list(c("Mild", "Moderate"),
+                                                                           c("Moderate", "Severe"),
+                                                                           c("Mild", "Severe")))
+
+full_model <- lm(Prop ~ Group + Age + Gender + Apoe + PMI,
+                 data=data)
+summary(full_model)
+
+full_model <- lm(Prop ~ Group + Age + Apoe + PMI + Gender:Group,
+                 data=data)
+summary(full_model)
+```
+
+### Differentially Expressed Genes
+
+```{r}
+# shaolab-1
+# cd /storage2/chenmingshare/wangshijia/PFC_427
+library(Seurat)
+data1 <- readRDS("PF427.pseudobulk.rds")
+data1@assays$RNA$data <- NULL
+data1@assays$RNA$scale.data <- NULL
+meta <- readRDS("PF427.pseudobulk.meta.rds")
+meta$orig.ident <- paste0(meta$Annotation, "_", meta$orig.ident)
+meta.sub <- meta[!duplicated(meta$orig.ident), ]
+row.names(meta.sub) <- meta.sub$orig.ident
+meta.sub <- meta.sub[data1$orig.ident, ]
+data1@meta.data <- meta.sub
+
+# saveRDS(meta.sub, "~/project/2022-10-14_mouse_spatial/sobj.PF427.pseudobulk.only_count.meta.rds")
+saveRDS(data1, "~/project/2022-10-14_mouse_spatial/sobj.PF427.pseudobulk.only_count.rds")
+
+# thinkpad
+sobj.427 <- readRDS("C:/Users/a8799/Desktop/database/rosmap_PFC_SN/sobj.PF427.pseudobulk.only_count.rds")
+sobj.427$Group <- ifelse(sobj.427$Braak >= 4 & sobj.427$Cerad <= 2,
+                                 "AD_pathology", "Non_AD")
+
+# When using Seurat's FindMarkers with the DESeq method to identify differentially expressed genes, how to pass experimental design information? I need to correct for certain covariates.
+# DeepSeek: It seems not supported.
+
+sobj.427$Apoe <- as.factor(sobj.427$Apoe)
+sobj.427$Age <- sub("90+", "90", sobj.427$Age, fixed = T)
+sobj.427$Age <- as.numeric(sobj.427$Age)
+sobj.427$Apoe[is.na(sobj.427$Apoe)] <- "33"
+sobj.427$PMI[is.na(sobj.427$PMI)] <- median(sobj.427$PMI, na.rm = T)
+
+# sce.427 <- as.SingleCellExperiment(sobj.427)
+library(DESeq2)
+library(dplyr)
+
+Idents(sobj.427) <- "Annotation"
+for (CT in unique(sobj.427$Annotation)) {
+  if (CT == "Exc") next
+  # [1] "Ast" "Exc" "Inh" "Mic" "Oligo" "OPC" "VSC"
+  # CT <- "Exc"
+ 
+  sobj.427.sub <- subset(sobj.427, idents=CT)
+ 
+  counts_matrix <- LayerData(sobj.427.sub, assay = "RNA", layer = "counts") # Seurat v5
+ 
+  # 1. Create DESeqDataSet object
+  # In the design formula (~), specify variables to be corrected for. Put 'Group' at the end for the comparison of interest.
+  dds <- DESeqDataSetFromMatrix(countData = counts_matrix,
+                                colData = sobj.427.sub@meta.data,
+                                design = ~ Age + Gender + Apoe + PMI + Group)
+ 
+  dds <- DESeq(dds)
+ 
+  # saveRDS(dds, paste0("../subprojects/2024-10-10_人和小鼠比较shijia/shijia_5622/", CT, ".dds.rds"))
+ 
+  results_table <- results(dds, contrast = c("Group", "AD_pathology", "Non_AD"))
+ 
+  saveRDS(results_table, paste0("../subprojects/2024-10-10_人和小鼠比较shijia/shijia_5622/PFC427.", CT, ".AD_vs_WT.rds"))
+}
+
+# Plotting
+library(readxl)
+library(ggplot2)
+library(ggrepel)
+mt.db <- read_excel("../001ST/000data/Human.MitoCarta3.0.xls", sheet = 2)
+mt.loc <- subset(mt.db, hg19_Chromosome == "chrM")$Symbol
+nu.loc <- subset(mt.db, hg19_Chromosome != "chrM")$Symbol
+
+for (CT in unique(sobj.427$Annotation)) {
+  # CT <- "Exc"
+  in.path <- paste0("../subprojects/2024-10-10_人和小鼠比较shijia/shijia_5622/PFC427.", CT, ".AD_vs_WT.rds")
+ 
+  results_table <- readRDS(in.path)
+ 
+  results_table.filt <- data.frame(results_table) %>%
+    filter((!is.na(pvalue)) & baseMean > 10) %>%
+    arrange(pvalue)
+ 
+  lfc.cutoff <- 0.2
+ 
+  df.sub <- results_table.filt
+  df.sub$direction <- ifelse(df.sub$log2FoldChange > 0, yes = "up", no = "down")
+  df.sub$color <- df.sub$direction
+  df.sub$color[!(abs(df.sub$log2FoldChange) > lfc.cutoff & df.sub$padj < 0.05)] <- "ns"
+  df.sub$gene <- row.names(df.sub)
+ 
+  DEGs.list <- df.sub$gene[df.sub$color != "ns"]
+   
+  Title <- paste0(CT, " AD vs WT")
+  p <- ggplot(df.sub, aes(log2FoldChange, -log10(padj), color=color)) +
+    geom_point(size=1) +
+    geom_vline(xintercept = lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+    geom_vline(xintercept = -lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+    geom_hline(yintercept = -log10(0.05), color = "grey", linetype = "dashed", size = axis_linewidth) +
+    scale_color_manual(name="", values = c("up"="red", "down"="blue", "ns"="grey")) +
+    labs(title = Title) +
+    theme_nature()
+ 
+  interested_genes <- intersect(mt.db$Symbol, DEGs.list)
+ 
+  p <- p + geom_text_repel(
+    data = subset(df.sub, gene %in% interested_genes),
+    aes(label = gene),
+    color = "black",
+    size = 7 * 0.35278,
+    box.padding = 0.5,
+    point.padding = 0.3,
+    min.segment.length = 0.2,
+    max.overlaps = Inf,
+    segment.color = "grey50",
+    segment.size = 0.5,
+    direction = "both",
+    nudge_x = 0.2,
+    nudge_y = 0.2
+  )
+ 
+  out.path <- paste0("../subprojects/2024-10-10_人和小鼠比较shijia/shijia_5622/PFC427.", CT, ".AD_vs_WT.png")
+  ggsave(out.path, p, width=6, height=5, dpi=300)
+}
+```
+
+## Validation in Human Bulk RNA-Seq Data
+
+Dataset: syn3388564
+
+Reference:  
+De Jager, Philip L et al. “A multi-omic atlas of the human frontal cortex for aging and Alzheimer's disease research.” Scientific data vol. 5 180142. 7 Aug. 2018, doi:10.1038/sdata.2018.142
+
+Reference script:  
+"C:\Users\a8799\Desktop\project\2022-10-14_mouse_spatial\subprojects\2024-10-03_亚楠\analysis.r"
+
+Previously, adjusted data were used directly with Spearman correlation or linear regression to compare group differences. This approach is not recommended. It is better to use raw count data and include all confounding factors as covariates in the model. This is also why ROSMAP, despite having over 600 samples, identified relatively few DEGs.
+
+Therefore, I plan to re-analyze DEGs using the raw count matrix.
+
+### ROSMAP Data Processing and DEA
+
+The downloaded `ROSMAP_RNAseq_FPKM_gene.tsv` file contains FPKM values generated by RSEM, which are not raw counts. Can DESeq2 still be used for differential expression analysis?
+
+Analysis steps:  
+1. Construct metadata: extract specimenID from column names of the count matrix, then link to individualID via meta.spi, and finally obtain a complete metadata table containing age, disease status, etc.  
+2. Preprocess metadata: impute missing values; convert “90+” in age_death to “90” and transform to numeric.  
+3. Build DESeq object.  
+4. Perform differential expression analysis.  
+5. Generate volcano plots.
+
+```{r}
+# Read necessary data
+# data <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/ROSMAP_RNAseq_FPKM_gene.tsv", sep="\t")
+data <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/ROSMAP_all_counts_matrix.txt", sep="\t", row.names=1)
+data <- data.frame(data[5:nrow(data), ])
+
+# meta.rna <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/ROSMAP_assay_rnaSeq_metadata.csv")
+meta.ind <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/ROSMAP_clinical.csv")
+meta.spi <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/ROSMAP_biospecimen_metadata.csv")
+
+ncol(data)
+# 639
+
+data.col <- sub("^X", "", colnames(data))
+meta.spi.sub <- subset(meta.spi, assay=="rnaSeq" & tissue == "dorsolateral prefrontal cortex" )
+nrow(meta.spi.sub)
+# [1] 1161
+
+meta.spi.sub <- subset(meta.spi.sub, grepl("\\d+_\\d+$", meta.spi.sub$specimenID))
+nrow(meta.spi.sub)
+# 671
+
+length(intersect(meta.spi.sub$specimenID, data.col)) # 638
+setdiff(data.col, meta.spi.sub$specimenID) # 150_120419_0_merged
+
+data.col <- sub("150_120419_0_merged", "150_120419", data.col)
+setdiff(data.col, meta.spi.sub$specimenID) # character(0)
+
+row.names(meta.spi.sub) <- meta.spi.sub$specimenID
+meta.spi.sub <- meta.spi.sub[data.col, c("individualID", "specimenID")]
+meta.spi.sub$data.col <- colnames(data)
+row.names(meta.spi.sub) <- colnames(data)
+
+row.names(meta.ind) <- meta.ind$individualID
+meta.ind$individualID <- NULL
+meta.ind.sub <- meta.ind[meta.spi.sub$individualID, ]
+
+nrow(meta.spi.sub)
+# [1] 639
+nrow(meta.ind.sub)
+# [1] 639
+ncol(data)
+# [1] 639
+
+meta.spi.sub <- cbind(meta.spi.sub, meta.ind.sub)
+meta.spi.sub$Group <- "Normal"
+meta.spi.sub$Group[meta.spi.sub$braaksc >= 4] <- "AD"
+
+# Preprocess metadata: impute missing values; convert “90+” in age_death to “90” and transform to numeric
+meta.spi.sub$age_death <- sub("90+", "90", meta.spi.sub$age_death, fixed = T)
+meta.spi.sub$age_death <- as.numeric(meta.spi.sub$age_death)
+meta.spi.sub$age_death[is.na(meta.spi.sub$age_death)] <- median(meta.spi.sub$age_death, na.rm = T)
+meta.spi.sub$msex[is.na(meta.spi.sub$msex)] <- 0
+meta.spi.sub$race[is.na(meta.spi.sub$race)] <- 1
+meta.spi.sub$apoe_genotype[is.na(meta.spi.sub$apoe_genotype)] <- 33
+meta.spi.sub$pmi[is.na(meta.spi.sub$pmi)] <- median(meta.spi.sub$pmi, na.rm=T)
+
+meta.spi.sub$msex <- factor(meta.spi.sub$msex)
+meta.spi.sub$race <- factor(meta.spi.sub$race)
+meta.spi.sub$apoe_genotype <- factor(meta.spi.sub$apoe_genotype)
+
+# Build DESeq object
+dds <- DESeqDataSetFromMatrix(countData = data,
+                              colData = meta.spi.sub,
+                              design = ~ age_death + msex + race + apoe_genotype + pmi + Group)
+
+dds <- DESeq(dds)
+saveRDS(dds, "C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.dds.rds")
+
+results_table <- results(dds, contrast = c("Group", "AD", "Normal"))
+results_table.sub <- subset(data.frame(results_table), (!is.na(pvalue)) & baseMean > 10)
+
+nrow(subset(results_table.sub, padj < 0.05))
+# 1882
+nrow(subset(results_table.sub, padj < 0.05 & abs(log2FoldChange) > 0.2))
+# [1] 505
+```
+
+#### ID Conversion
+
+```{r}
+# ID conversion
+# In R, how to batch convert GRCh38 gene IDs (e.g., ENSG00000117266.15) to gene symbols?
+
+# Install (if not installed)
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+# BiocManager::install("org.Hs.eg.db")
+# BiocManager::install("AnnotationDbi")
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# Assume your Ensembl ID vector is called ensembl_ids (with version numbers)
+ensembl_ids <- row.names(results_table.sub)
+
+# Remove version numbers (keep only ENSGxxxxxxxxxxx part)
+ensembl_base <- gsub("\\..*$", "", ensembl_ids)
+
+# Batch conversion (multiVals="first" takes the first match when there are multiple)
+symbols <- mapIds(org.Hs.eg.db,
+                 keys = ensembl_base,
+                 column = "SYMBOL",
+                 keytype = "ENSEMBL",
+                 multiVals = "first")
+
+# Create a data frame to view the result
+result_df <- data.frame(ensembl_versioned = ensembl_ids,
+                        ensembl = ensembl_base,
+                        symbol = symbols)
+
+# Unmatched entries will be NA (usually pseudogenes or non-coding genes)
+head(result_df)
+
+result_df$symbol[is.na(result_df$symbol)] <- result_df$ensembl[is.na(result_df$symbol)]
+all(row.names(results_table.sub) == result_df$ensembl_versioned)
+# [1] TRUE
+
+results_table.sub$gene <- result_df$symbol
+results_table.sub <- results_table.sub[order(results_table.sub$pvalue), ]
+degs <- subset(results_table.sub, padj < 0.05)$gene
+```
+
+#### Plotting
+
+##### Volcano Plots with Different LFC Cutoffs
+
+```{r}
+# Plotting
+library(readxl)
+library(ggplot2)
+library(ggrepel)
+mt.db <- read_excel("../001ST/000data/Human.MitoCarta3.0.xls", sheet = 2)
+intersect(degs, mt.db$Symbol)
+intersect(degs, c("C1QA", "C1QB", "TREM2", "C1QC"))
+subset(results_table.sub, gene %in% mt.db$Symbol)
+
+for (lfc.cutoff in c(0.2, 0.4)) {
+  # lfc.cutoff <- 0.1
+  df.sub <- results_table.sub
+  df.sub$direction <- ifelse(df.sub$log2FoldChange > 0, yes = "up", no = "down")
+  df.sub$color <- df.sub$direction
+  df.sub$color[!(abs(df.sub$log2FoldChange) > lfc.cutoff & df.sub$padj < 0.05)] <- "ns"
+ 
+  DEGs.list <- df.sub$gene[df.sub$color != "ns"]
+   
+  Title <- paste0("ROSMAP AD vs WT")
+  p <- ggplot(df.sub, aes(log2FoldChange, -log10(padj), color=color)) +
+    geom_point(size=1) +
+    geom_vline(xintercept = lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+    geom_vline(xintercept = -lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+    geom_hline(yintercept = -log10(0.05), color = "grey", linetype = "dashed", size = axis_linewidth) +
+    scale_color_manual(name="", values = c("up"="red", "down"="blue", "ns"="grey")) +
+    labs(title = Title) +
+    theme_nature()
+ 
+  for (plot.type in c("mt.degs", "degs")) {
+   
+    if (plot.type == "mt.degs") {
+      interested_genes <- intersect(mt.db$Symbol, DEGs.list)
+    } else {
+      interested_genes <- DEGs.list
+    }
+   
+    p1 <- p + geom_text_repel(
+      data = subset(df.sub, gene %in% interested_genes),
+      aes(label = gene),
+      color = "black",
+      size = 7 * 0.35278,
+      box.padding = 0.5,
+      point.padding = 0.3,
+      min.segment.length = 0.2,
+      max.overlaps = Inf,
+      segment.color = "grey50",
+      segment.size = 0.5,
+      direction = "both",
+      nudge_x = 0.2,
+      nudge_y = 0.2
+    )
+   
+    out.path <- paste0("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.dds.",
+                       plot.type, ".lfc_", lfc.cutoff, ".png")
+    ggsave(out.path, p1, width=6, height=5, dpi=300)
+  }
+}
+```
+
+##### Display mt DEGs
+
+```{r}
+# lfc.cutoff <- 0.1
+df.sub <- subset(results_table.sub, gene %in% mt.db$Symbol)
+df.sub$direction <- ifelse(df.sub$log2FoldChange > 0, yes = "up", no = "down")
+df.sub$color <- df.sub$direction
+# df.sub$color[!(abs(df.sub$log2FoldChange) > lfc.cutoff & df.sub$padj < 0.05)] <- "ns"
+df.sub$color[! df.sub$padj < 0.05] <- "ns"
+DEGs.list <- df.sub$gene[df.sub$color != "ns"]
+ 
+Title <- paste0("ROSMAP AD vs WT (Only MT Related Genes)")
+p <- ggplot(df.sub, aes(log2FoldChange, -log10(padj), color=color)) +
+  geom_point(size=1) +
+  # geom_vline(xintercept = lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+  # geom_vline(xintercept = -lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+  geom_hline(yintercept = -log10(0.05), color = "grey", linetype = "dashed", size = axis_linewidth) +
+  scale_color_manual(name="", values = c("up"="red", "down"="blue", "ns"="grey")) +
+  labs(title = Title) +
+  theme_nature()
+
+if (F) {
+  # Not plotting gene labels may look better as it can be too crowded.
+  interested_genes <- intersect(mt.db$Symbol, DEGs.list)
+  p1 <- p + geom_text_repel(
+    data = subset(df.sub, gene %in% interested_genes),
+    aes(label = gene),
+    color = "black",
+    size = 7 * 0.35278,
+    box.padding = 0.5,
+    point.padding = 0.3,
+    min.segment.length = 0.2,
+    max.overlaps = Inf,
+    segment.color = "grey50",
+    segment.size = 0.5,
+    direction = "both",
+    nudge_x = 0.2,
+    nudge_y = 0.2
+  )
+}
+
+out.path <- paste0("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.dds.mt.png")
+ggsave(out.path, p, width=6, height=5, dpi=300)
+```
+
+##### GSEA
+
+```{r}
+library(clusterProfiler)
+library(fgsea)
+library(msigdbr) # Used to retrieve MSigDB gene sets
+
+dds <- readRDS("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.dds.rds")
+results_table <- results(dds, contrast = c("Group", "AD", "Normal"))
+results_table.sub <- subset(data.frame(results_table), (!is.na(pvalue)) & baseMean > 10)
+
+# Run the "ID Conversion" section above first
+results_table.sub <- results_table.sub[!duplicated(results_table.sub$gene), ]
+gene_list <- results_table.sub$log2FoldChange
+names(gene_list) <- results_table.sub$gene
+gene_list <- sort(gene_list, decreasing = TRUE) # Sort from highest up-regulated to highest down-regulated
+
+COLLECT <- "C5"
+m_df <- msigdbr(species = "Homo sapiens", collection = COLLECT)
+
+gsea_res4 <- GSEA(
+  geneList = gene_list,
+  exponent = 1,
+  minGSSize = 5,
+  maxGSSize = 500,
+  pvalueCutoff = 0.1,
+  pAdjustMethod = "BH",
+  TERM2GENE = data.frame(term = m_df$gs_name,
+                         gene = m_df$gene_symbol)
+)
+
+saveRDS(gsea_res4, "C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.GSEA.rds")
+write.csv(gsea_res4@result, "C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.GSEA.csv")
+```
+
+##### GSEA Plot
+
+```{r rosmap-bulk-ad-vs-wt-gseaplot-pdf}
+pathway <- "GOCC_MITOCHONDRIAL_MATRIX"
+gsea_result <- readRDS("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.GSEA.rds")
+p1 <- gseaplot(gsea_result, geneSetID = pathway, by = "runningScore")
+p1@layers$geom_linerange <- NULL
+p1@layers$geom_line <- NULL
+
+p.adj <- subset(gsea_result@result, ID==pathway)$p.adjust
+if (p.adj < 0.0001) {
+  subtitle <- paste0("Adjusted <i>P</i> < 0.0001")
+} else {
+  pvalue <- round(p.adj, 3)
+  subtitle <- paste0("Adjusted <i>P</i> = ", pvalue)
+}
+
+p1 <- p1 + ggtitle("GO: Mitochondrial matrix\nAD vs Normal in ROSMAP",
+                   subtitle = subtitle) +
+  geom_linerange(aes(x = x, ymin = ymin, ymax = ymax),
+                 linewidth = 0.1,
+                 color = "black") +
+  geom_line(aes(y=runningScore), color="green", size=0.5) +
+  theme_nature() + theme(plot.subtitle = element_markdown(size=8))
+
+# publish:
+out.path <- paste0("C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.gseaplot.pdf")
+ggsave(out.path, p1, width=2.5, height=2.4174, device=cairo_pdf)
+```
+
+### MSBB Dataset
+
+In the MSBB (Mount Sinai Brain Bank) cohort, BM10, BM22, BM36, and BM44 are Brodmann area codes representing four different cortical regions. These regions were selected in the AMP-AD project to study regional vulnerability in Alzheimer's disease. Among them, BM36 and BM44 are most vulnerable to AD, BM22 is moderately vulnerable, and BM10 is relatively late-affected.
+
+| Code | Full English Name                  | Chinese Name          | Abbreviation | AD Vulnerability Rank (approx.) |
+|------|------------------------------------|-----------------------|--------------|---------------------------------|
+| BM10 | Frontal pole (Brodmann area 10)    | 额极（前额叶极）      | FP           | Low (~14th)                     |
+| BM22 | Superior temporal gyrus (BA 22)    | 颞上回                | STG          | Moderate (~7th)                 |
+| BM36 | Parahippocampal gyrus (BA 36)      | 海马旁回              | PHG          | Highest (1st)                   |
+| BM44 | Inferior frontal gyrus (BA 44)     | 额下回                | IFG          | Very high (2nd)                 |
+
+#### BM 44: DESeq Analysis
+
+Why do ROSMAP and MSBB define CERAD completely differently? In ROSMAP, 1 represents "Definite AD"; in MSBB, 1 represents "no AD".
+
+```{r}
+data <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/msbb/AMP-AD_MSBB_MSSM_BM_44.raw_counts.tsv",
+                 sep="\t", row.names=1)
+meta.spi <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/msbb/metadata/MSBB_biospecimen_metadata.csv")
+meta.ind <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/msbb/metadata/MSBB_individual_metadata.csv")
+
+data.spi_id <- colnames(data)
+meta.data <- meta.spi[, c("individualID", "specimenID")]
+meta.data <- subset(meta.data, meta.data$specimenID %in% data.spi_id)
+row.names(meta.data) <- meta.data$specimenID
+meta.data <- meta.data[data.spi_id, ]
+
+row.names(meta.ind) <- meta.ind$individualID
+meta.ind$individualID <- NULL
+meta.ind <- meta.ind[meta.data$individualID, ]
+
+meta.data <- cbind(meta.data, meta.ind)
+all(row.names(meta.data) == data.spi_id) # TRUE
+
+# Preprocess data
+meta.data$ageDeath <- as.numeric(sub("+", "", meta.data$ageDeath, fixed = T))
+meta.data$ageDeath[is.na(meta.data$ageDeath)] <- median(meta.data$ageDeath, na.rm = T)
+meta.data$sex[is.na(meta.data$sex)] <- "female"
+meta.data$race[is.na(meta.data$race)] <- "W"
+meta.data$apoeGenotype[is.na(meta.data$apoeGenotype)] <- 33
+meta.data$apoeGenotype <- factor(meta.data$apoeGenotype)
+meta.data$pmi[is.na(meta.data$pmi)] <- median(meta.data$pmi, na.rm = T)
+
+meta.data$Group <- "Normal"
+meta.data$Group[meta.data$Braak >= 4] <- "AD"
+
+# Build DESeq object
+dds <- DESeqDataSetFromMatrix(countData = data,
+                              colData = meta.data,
+                              design = ~ ageDeath + sex + race + apoeGenotype + pmi + Group)
+
+dds <- DESeq(dds)
+saveRDS(dds, "C:/Users/a8799/Desktop/database/rosmap_bulk/msbb/AMP-AD_MSBB_MSSM_BM_44.raw_counts.dds.rds")
+
+results_table <- results(dds, contrast = c("Group", "AD", "Normal"))
+results_table.sub <- subset(data.frame(results_table), (!is.na(pvalue)) & baseMean > 10)
+
+nrow(subset(results_table.sub, padj < 0.05))
+nrow(subset(results_table.sub, padj < 0.05 & abs(log2FoldChange) > 0.2))
+```
+
+#### Four Brain Regions: Reprocessed
+
+Tissue labeled as "IFG" corresponds to the BM44 region.
+
+```{r}
+library(readxl)
+df <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/msbb/MSSM_FP_STG_PHG_IFG_DiffExpression.tsv", sep="\t")
+mt.db <- read_excel("../001ST/000data/Human.MitoCarta3.0.xls", sheet = 2)
+```
+
+```{r}
+head(df)
+```
+
+```{r}
+factor.col <- c("Model", "Tissue", "Comparison")
+for (i in factor.col) df[[i]] <- factor(df[[i]])
+summary(df)
+```
+
+```{r}
+table(df$Model, df$Comparison)
+```
+
+```{r}
+# Investigate expression of MT genes
+mt.db <- read_excel("../001ST/000data/Human.MitoCarta3.0.xls", sheet = 2)
+
+# Which statistical model yielded the most MT DEGs?
+df.sub.sig.mt <- subset(df, adj.P.Val < 0.05 & hgnc_symbol %in% mt.db$Symbol)
+table(df.sub.sig.mt$Model)
+      # Diagnosis Diagnosis.AOD Diagnosis.Sex SourceDiagnosis
+      # 11 3 2 36
+
+# Still SourceDiagnosis. What does CDR mean?
+df.sub.sig.mt.SourceDiagnosis <- subset(df, adj.P.Val < 0.05 &
+                                          hgnc_symbol %in% mt.db$Symbol &
+                                          Model == "SourceDiagnosis")
+
+# Number of up- and down-regulated mt DEGs
+df.sub.sig.mt.SourceDiagnosis$direction <- ifelse(df.sub.sig.mt.SourceDiagnosis$logFC > 0, "up", "down")
+table(df.sub.sig.mt.SourceDiagnosis$direction)
+# down up
+# 22 14
+```
+
+Production:
+
+```{r}
+library(readxl)
+# df <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/msbb/MSSM_FP_STG_PHG_IFG_DiffExpression.tsv", sep="\t")
+df.sub <- subset(df,
+                 adj.P.Val < 0.05 &
+                 Model == "SourceDiagnosis" &
+                 hgnc_symbol %in% mt.db$Symbol)
+
+df.sub$direction <- ifelse(df.sub$logFC > 0, "up", "down")
+table(df.sub$Tissue, df.sub$direction)
+```
+
+##### Volcano Plot
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(ggrepel)
+
+df.sub <- subset(df,
+                 adj.P.Val < 0.05 &
+                 Tissue == "STG" &
+                 Model == "SourceDiagnosis" &
+                 hgnc_symbol %in% mt.db$Symbol)
+
+lfc.cutoff <- 0
+df.sub$log2FoldChange <- df.sub$logFC
+df.sub$padj <- df.sub$adj.P.Val
+df.sub$gene <- df.sub$hgnc_symbol
+df.sub$direction <- ifelse(df.sub$log2FoldChange > 0, yes = "up", no = "down")
+df.sub$color <- df.sub$direction
+df.sub$color[!(abs(df.sub$log2FoldChange) > lfc.cutoff & df.sub$padj < 0.05)] <- "ns"
+
+DEGs.list <- df.sub$gene[df.sub$color != "ns"]
+Title <- paste0("MSBB AD vs WT")
+
+p <- ggplot(df.sub, aes(log2FoldChange, -log10(padj), color=color)) +
+  geom_point(size=1) +
+  geom_vline(xintercept = lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+  geom_vline(xintercept = -lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+  geom_hline(yintercept = -log10(0.05), color = "grey", linetype = "dashed", size = axis_linewidth) +
+  scale_color_manual(name="", values = c("up"="red", "down"="blue", "ns"="grey")) +
+  labs(title = Title) +
+  theme_nature()
+p
+```
+
+### MAYO Dataset: Original
+
+```{r}
+data <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/mayo/MayoRNAseq_RNAseq_TCX_geneCounts-278.tsv",
+                 sep="\t", row.names=1)
+meta.spi <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/mayo/metadata/MayoRNAseq_biospecimen_metadata.csv")
+meta.ind <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/mayo/metadata/MayoRNAseq_individual_metadata.csv")
+```
+
+### MAYO Dataset: Reprocessed
+
+```{r}
+df <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/mayo/MAYO_CBE_TCX_DiffExpression.tsv",
+                 sep="\t", )
+```
+
+```{r}
+head(df)
+```
+
+```{r}
+factor.col <- c("Model", "Tissue.ref", "Comparison", "Tissue.ag")
+for (i in factor.col) df[[i]] <- factor(df[[i]])
+summary(df)
+```
+
+```{r}
+all(df$Tissue.ref == df$Tissue.ag)
+```
+
+```{r}
+df.sub <- subset(df,
+                 adj.P.Val < 0.05 &
+                 Comparison == "AD-CONTROL" &
+                 Model == "SourceDiagnosis" &
+                 hgnc_symbol %in% mt.db$Symbol)
+
+df.sub$direction <- ifelse(df.sub$logFC > 0, "up", "down")
+table(df.sub$Tissue.ref, df.sub$direction)
+```
+
+##### Volcano Plot
+
+```{r}
+library(readxl)
+library(ggplot2)
+library(ggrepel)
+
+lfc.cutoff <- 0
+axis_linewidth <- 1 * 0.35278 # 1 pt
+
+df.sub <- subset(df,
+                 adj.P.Val < 0.05 &
+                 Comparison == "AD-CONTROL" &
+                 Model == "SourceDiagnosis" &
+                 Tissue.ref == "TCX" &
+                 hgnc_symbol %in% mt.db$Symbol)
+
+df.sub$direction <- ifelse(df.sub$logFC > 0, "up", "down")
+df.sub$log2FoldChange <- df.sub$logFC
+df.sub$padj <- df.sub$adj.P.Val
+df.sub$gene <- df.sub$hgnc_symbol
+df.sub$color <- df.sub$direction
+df.sub$color[!(abs(df.sub$log2FoldChange) > lfc.cutoff & df.sub$padj < 0.05)] <- "ns"
+
+Title <- paste0("MAYO TCX AD vs WT")
+p <- ggplot(df.sub, aes(log2FoldChange, -log10(padj), color=color)) +
+  geom_point(size=1) +
+  geom_vline(xintercept = lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+  geom_vline(xintercept = -lfc.cutoff, color = "grey", linetype = "dashed", size = axis_linewidth) +
+  geom_hline(yintercept = -log10(0.05), color = "grey", linetype = "dashed", size = axis_linewidth) +
+  scale_color_manual(name="", values = c("up"="red", "down"="blue", "ns"="grey")) +
+  labs(title = Title) +
+  theme_nature()
+
+suppressWarnings(p)
+```
+
+### MSBB GSEA
+
+```{r}
+library(clusterProfiler)
+library(fgsea)
+library(msigdbr)
+
+df <- read.csv("C:/Users/a8799/Desktop/database/rosmap_bulk/msbb/MSSM_FP_STG_PHG_IFG_DiffExpression.tsv", sep="\t")
+df.sub <- subset(df, Model == "SourceDiagnosis" & Tissue=="FP")
+
+# Note: The following lines appear to have errors in the original code (gene_list and results_table.sub are not defined here). 
+# Please correct the variable names according to your actual data before running.
+
+gene_list <- results_table.sub$log2FoldChange
+names(gene_list) <- results_table.sub$gene
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+COLLECT <- "C5"
+m_df <- msigdbr(species = "Homo sapiens", collection = COLLECT)
+
+gsea_res4 <- GSEA(
+  geneList = gene_list,
+  exponent = 1,
+  minGSSize = 5,
+  maxGSSize = 500,
+  pvalueCutoff = 0.1,
+  pAdjustMethod = "BH",
+  TERM2GENE = data.frame(term = m_df$gs_name,
+                         gene = m_df$gene_symbol)
+)
+
+saveRDS(gsea_res4, "C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.GSEA.rds")
+write.csv(gsea_res4@result, "C:/Users/a8799/Desktop/database/rosmap_bulk/rosmap/rosmap.bulk.AD_vs_WT.GSEA.csv")
+```

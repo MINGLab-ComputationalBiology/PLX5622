@@ -1,0 +1,761 @@
+
+
+## DEGs Identification: Pseudobulk
+### Summarize to Pseudobulk
+```{r ST-pseudobulk-DEGs, eval=FALSE, include=FALSE}
+source("script/load_checkpoint.r")
+#---------------------------------------------------------------
+library(SingleCellExperiment)
+library(Seurat)
+# Split by brain region
+meta <- data.frame(testcombo@cell_metadata$cell$rna@metaDT)
+row.names(meta) <- meta$cell_ID
+gobj.count <- CreateSeuratObject(testcombo@expression$cell$rna$raw@exprMat,
+                              meta.data=meta)
+sce <- as.SingleCellExperiment(gobj.count)
+summed <- scuttle::aggregateAcrossCells(sce,
+             id=colData(sce)[,c("cell_types", "list_ID")])
+saveRDS(summed, "001Giotto_out/003DEGs/DESeq/gobj.pseudocount_by_sample_br.rds")
+summed.whole <- scuttle::aggregateAcrossCells(sce,
+             id=colData(sce)[,c("list_ID")])
+saveRDS(summed.whole, "001Giotto_out/003DEGs/DESeq/gobj.pseudocount_by_sample.rds")
+```
+
+### DESeq2 (old)
+```{r}
+# -----------------------------------
+# PCA for each sample + brain region
+mtx <- assays(summed)$counts
+meta <- colData(summed)
+row.names(meta) <- paste0(meta$list_ID, "_", meta$cell_types)
+colnames(mtx) <- paste0(meta$list_ID, "_", meta$cell_types)
+sobj.agg.L1 <- CreateSeuratObject(mtx, meta.data=as.data.frame(meta))
+sobj.agg.L1 <- NormalizeData(sobj.agg.L1)
+sobj.agg.L1 <- FindVariableFeatures(sobj.agg.L1)
+sobj.agg.L1 <- ScaleData(sobj.agg.L1)
+sobj.agg.L1 <- RunPCA(sobj.agg.L1)
+p1 <- DimPlot(sobj.agg.L1, reduction="pca", shape.by="batch", group.by="cell_types")
+p2 <- DimPlot(sobj.agg.L1, reduction="pca", shape.by="batch", group.by="treatment")
+dir.create("001Giotto_out/003DEGs/DESeq")
+ggplot2::ggsave("001Giotto_out/003DEGs/DESeq/test.png", p1)
+ggplot2::ggsave("001Giotto_out/003DEGs/DESeq/test2.png", p2)
+#----------------------------------------
+# PCA for each sample
+sce.agg_by_sample <- scuttle::aggregateAcrossCells(sce,
+             id=colData(sce)[,"list_ID"])
+mtx <- assays(sce.agg_by_sample)$counts
+meta <- colData(sce.agg_by_sample)
+row.names(meta) <- meta$list_ID
+colnames(mtx) <- meta$list_ID
+sobj.agg.L1 <- CreateSeuratObject(mtx, meta.data=as.data.frame(meta))
+sobj.agg.L1 <- NormalizeData(sobj.agg.L1)
+sobj.agg.L1 <- FindVariableFeatures(sobj.agg.L1)
+sobj.agg.L1 <- ScaleData(sobj.agg.L1)
+sobj.agg.L1 <- RunPCA(sobj.agg.L1, npcs=2)
+p1 <- DimPlot(sobj.agg.L1, reduction="pca", shape.by="batch", group.by="treatment")
+ggplot2::ggsave("001Giotto_out/003DEGs/DESeq/PCA.each_sample.png", p1)
+# -----------------------------------
+# Differential Expression Analysis
+# dhlab
+if (F) {
+  # Old code.
+  library(DESeq2)
+ 
+  pair_wise_result <- list()
+ 
+  # If only treatment is used, there are no results. If treatment + batch is used, there are more results.
+  for (ct in unique(summed$cell_types)){
+    if (ct=="C12") next
+    # ct <- "Hippocampus"
+    summed.sub <- subset(summed, cell_types==ct)
+    dds <- DESeqDataSet(summed.sub, ~ treatment + batch)
+    dds <- DESeq(dds)
+    # resultsNames(dds)
+    res <- results(dds, name = "treatment_PLX5622_vs_FADCtrl")
+    res.df <- data.frame(res)
+    res.df <- res.df[!is.na(res.df$padj), ]
+    res.df <- subset(res.df, padj < 0.05)
+    pair_wise_result[[ct]] <- res.df
+  }
+ 
+  saveRDS(pair_wise_result, "001Giotto_out/003DEGs/DESeq/pair_wise_result.rds")
+ 
+  for (x in names(pair_wise_result)){
+    df <- pair_wise_result[[x]]
+    if (nrow(df) == 0) {
+      print(x)
+      pair_wise_result$x <- NULL
+      next
+    }
+    df$gene <- row.names(df)
+    df$brain_region <- x
+    pair_wise_result[[x]] <- df
+  }
+ 
+  st.DEGs.deseq <- Reduce(rbind, pair_wise_result)
+  row.names(st.DEGs.deseq) <- 1:nrow(st.DEGs.deseq)
+  write.csv(st.DEGs.deseq, "001Giotto_out/003DEGs/DESeq/st.DEGs.deseq.csv")
+}
+# Try using only the first two batches of single cells for differential expression analysis.
+# Investigate genes that are significant in both methods one by one.
+# DEGs in cell types highly expressed in 5xFAD?
+# Without separating brain regions
+meta <- data.frame(testcombo@cell_metadata$cell$rna@metaDT)
+row.names(meta) <- meta$cell_ID
+gobj.count <- CreateSeuratObject(testcombo@expression$cell$rna$raw@exprMat,
+                              meta.data=meta)
+sce <- as.SingleCellExperiment(gobj.count)
+summed <- scuttle::aggregateAcrossCells(sce,
+             id=colData(sce)[,"list_ID"])
+dds <- DESeqDataSet(summed, ~ treatment + batch)
+dds <- DESeq(dds)
+# resultsNames(dds)
+res <- results(dds, name = "treatment_PLX5622_vs_FADCtrl")
+res <- data.frame(filt.res(res))
+write.csv(res, "001Giotto_out/003DEGs/DESeq/whole_brain.csv")
+counts.normalized <- counts(dds, normalized=T)
+up.genes <- res[res$log2FoldChange > 0, ]
+ # [1] "mt-Atp8" "mt-Nd4l" "mt-Nd3" "mt-Nd2" "Nr1d1": oxidative phosphorylation
+# "Dbp" "Slc13a3" "Rps29"
+ # [8] "Polr2l" "Slc13a4" "Arc" "Ciart"
+# Dbp: transcription factor family. Binds to genes such as albumin, CYP2A4, and CYP2A5. Involved in the regulation of some circadian rhythm genes.
+# Nr1d1: This gene encodes a transcription factor that is a member of the nuclear receptor subfamily 1. In particular, this protein represses the circadian clock transcription factor aryl hydrocarbon receptor nuclear translocator-like protein 1 (ARNTL).
+# Ciart: behavior. Circadian regulation of gene expression. Transcription factor, negative regulation.
+# Arc: regulation of dendritic spine morphogenesis. Regulation of cell morphogenesis.
+# Polr2l: Signaling by Receptor Tyrosine Kinases
+# Slc11a1|Slc13a3|Slc13a4: Transport of bile salts and organic acids, metal ions and amine compounds
+# Metascape enrichment analysis.
+# After enrichment analysis, many similar pathways appear. See if these pathways can be divided into relatively independent modules.
+# Take genes from the top 10 pathways and calculate intersection indices.
+# Remove genes from the top 10 pathways from all DEGs and see what remains.
+all.list <- read.csv("001Giotto_out/003DEGs/DESeq/whole_brain.")
+top10.genes <- unique(unlist(strsplit(all.list$Hits[1:10], "|", fixed=T)))
+other.genes <- setdiff(row.names(res), c(top10.genes, row.names(up.genes)))
+# [1] "Fcrls" "Tmem119" "P2ry12" "Olfml3" "Crybb1" "Siglech" "Cst7"
+# [8] "Gngt2" "Rnase4" "Gpr34" "Ltc4s" "Itgb5" "Ptpn18" "P2ry13"
+# [15] "Abi3" "Slco2b1" "Hexa" "Plxdc2" "Lpcat2" "Eif2s3y" "Fermt3"
+# [22] "Ptgs1" "Lgmn" "Tbxas1" "Cyth4" "Shank3" "F11r" "Phyhd1"
+# [29] "Lzts3"
+for (i in other.genes) {
+  print(i)
+  print(head(all.list[grepl(i, all.list$Hits), "Description"]))
+  cat("\n")
+}
+# No pathways were enriched.
+# Immune-related:
+# Fcrls, Olfml3, Gpr34, Slco2b1, Plxdc2, Eif2s3y, Cyth4, Phyhd1:
+#
+# Tmem119: Function unknown. Positive regulation of phosphorylation?
+# P2ry12: Related to cell migration
+# Immune-related: signal transduction, transcriptional activation, chemotaxis, motility, phagocytosis, degradation, antigen presentation.
+# Cst7: regulation of inflammatory response
+# Rnase4: defense response to bacterium
+# Itgb5: Adaptive Immune System
+# Siglech: endocytosis
+# Hexa: Lysosome
+# Lpcat2: Metabolism of lipids
+# Gngt2: Chemokine signaling pathway
+# Fermt3, F11r: leukocyte cell-cell adhesion
+# Lgmn: antigen processing and presentation
+# Signal regulation:
+# Ptpn18: Signaling by Receptor Tyrosine Kinases
+# P2ry13: G alpha (i) signalling events
+# Development-related:
+# Crybb1: visual system development
+# Tbxas1, Ptgs1, Ltc4s: Eicosanoid synthesis, Platelet activation
+# Neural-related:
+# Shank3: locomotion, regulation of long-term synaptic potentiation
+# Lzts3: regulation of postsynapse organization
+```
+
+### DESeq2
+```{r}
+library(DESeq2)
+summed <- readRDS("../001ST/001Giotto_out/003DEGs/DESeq/gobj.pseudocount_by_sample_br.rds")
+for (ct in unique(summed$cell_types)){
+  if (ct=="C12") next
+  # ct <- "Hippocampus"
+  summed.sub <- subset(summed, ,cell_types==ct)
+  dds <- DESeqDataSet(summed.sub, ~ treatment + batch)
+ 
+  levels(dds$treatment)
+  # [1] "FADCtrl" "PLX5622" "WTCtrl"
+ 
+  dds <- DESeq(dds)
+  saveRDS(dds, paste0("../001ST/001Giotto_out/003DEGs/DESeq/", make.names(ct), ".rds"))
+}
+result.list <- list()
+for (ct in unique(summed$cell_types)){
+  if (ct=="C12") next
+  # resultsNames(dds)
+  in.path <- paste0("../001ST/001Giotto_out/003DEGs/DESeq/", make.names(ct), ".rds")
+  dds <- readRDS(in.path)
+  res <- results(dds, name = "treatment_PLX5622_vs_FADCtrl")
+  res.df1 <- data.frame(res)
+  res.df1$gene <- row.names(res.df1) # If the gene is used as row name, gene names may cause errors when merging tables with duplicate genes.
+  res.df1$comparison <- "PLX5622_vs_FADCtrl"
+ 
+  res <- results(dds, contrast = c("treatment", "FADCtrl", "WTCtrl"))
+  res.df2 <- data.frame(res)
+  res.df2$comparison <- "FADCtrl_vs_WTCtrl"
+  res.df2$gene <- row.names(res.df2)
+  result.list[[ct]] <- rbind(res.df1, res.df2)
+}
+saveRDS(result.list, "../001ST/001Giotto_out/003DEGs/DESeq/DESeq_result.sample_br.list.rds")
+if (F) {
+  # Unfiltered tables take up space and are rarely viewed, so it is better to save as rds.
+  result.df <- Reduce(rbind, result.list)
+  write.csv(result.df, "../001ST/001Giotto_out/003DEGs/DESeq/DESeq.sample_br.csv")
+}
+```
+
+### Pseudobulk DEGs Heatmap
+```{r}
+result.list <- readRDS("../001ST/001Giotto_out/003DEGs/DESeq/DESeq_result.sample_br.list.rds")
+df.merged <- data.frame()
+for (BR in names(result.list)) {
+  # BR <- names(result.list)[1]
+  if (BR %in% c("Third Ventricle", "Lateral Ventricle")) next
+  df <- result.list[[BR]]
+  df.sub <- subset(df, padj < 0.05 & baseMean > 10 & abs(log2FoldChange) > 0.4)
+  df.sub$Brain_region <- BR
+  df.merged <- rbind(df.merged, df.sub)
+}
+write.csv(df.merged, "../001ST/001Giotto_out/003DEGs/DESeq/DESeq_result.sample_br.DEGs.csv")
+# df.merged <- read.csv("../001ST/001Giotto_out/003DEGs/DESeq/DESeq_result.sample_br.DEGs.csv", row.names=1)
+df.merged$Brain_region.uniq <- paste0(df.merged$Brain_region,
+                                      ifelse(df.merged$comparison == "FADCtrl_vs_WTCtrl", "1", "2"))
+library(reshape2)
+df.merged.sub <- subset(df.merged, comparison == "FADCtrl_vs_WTCtrl")
+df.dcast <- dcast(gene~Brain_region, value.var = "log2FoldChange", data=df.merged)
+df.dcast[is.na(df.dcast)] <- 0
+df.dcast <- data.frame(df.dcast[, -1], row.names=df.dcast$gene)
+p <- pheatmap(df.dcast, cluster_cols = T, cutree_rows = 5, scale="row")
+```
+
+#### AD vs WT
+In transcriptome analysis, I want to use heatmaps to cluster genes based on their expression patterns across different treatments and display the genes contained in each cluster. Using `cutree_rows` in pheatmap can accomplish this task, but now I encounter a problem: there are too many genes, and the heatmap cannot display them completely. What are the solutions?
+
+I want to perform clustering with pheatmap and display all genes, but without showing row names. Then put the genes of each cluster after clustering into a table. How can this be done in R?
+```{r}
+df.merged.sub <- subset(df.merged, comparison == "FADCtrl_vs_WTCtrl")
+df.dcast <- dcast(gene~Brain_region, value.var = "log2FoldChange", data=df.merged.sub)
+df.dcast[is.na(df.dcast)] <- 0
+df.dcast <- data.frame(df.dcast[, -1], row.names=df.dcast$gene)
+mat_scaled <- df.dcast
+for (i in 1:nrow(mat_scaled)) {
+  row_abs_max <- max(abs(mat_scaled[i, ]), na.rm = TRUE)
+  if (row_abs_max > 0) { # Avoid division by zero
+    mat_scaled[i, ] <- mat_scaled[i, ] / row_abs_max
+  }
+  # If the entire row is 0, it remains 0
+}
+# Step 2: Define colors and breaks to ensure 0 is white, >0 is red, <0 is blue
+my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+# breaks: evenly distributed from -1 to 1, ensuring 0 is in the middle (white)
+my_breaks <- seq(-1, 1, length.out = 101)
+k <- 6
+p <- pheatmap(mat_scaled, scale="none", show_rownames = FALSE)
+row_clusters <- cutree(p$tree_row, k = k)
+annotation_row <- data.frame(
+  Cluster = factor(row_clusters, levels = 1:k, labels = paste0("C", 1:k))
+)
+rownames(annotation_row) <- rownames(mat)
+p <- pheatmap(mat_scaled,
+         cluster_rows = p$tree_row,
+         scale = "none",
+         show_rownames = FALSE,
+         color = my_colors,
+         breaks = my_breaks,
+         annotation_row = annotation_row,
+         main = "pseudobulk ST DEGs (AD vs WT)")
+library(grid)
+pdf("../001ST/001Giotto_out/003DEGs/DESeq/pseudobulk_ST_DEGs_AD_vs_WT.pdf", width=4.97, height=9.08)
+grid.newpage()
+grid.draw(p$gtable)
+dev.off()
+png("../001ST/001Giotto_out/003DEGs/DESeq/pseudobulk_ST_DEGs_AD_vs_WT.png", width=4.97, height=9.08, units="in", res=300)
+grid.newpage()
+grid.draw(p$gtable)
+dev.off()
+library(dplyr)
+# Export table
+df <- data.frame(Gene = rownames(df.dcast), Cluster = paste0("C", row_clusters)) %>%
+  arrange(Cluster, Gene)
+df <- aggregate(Gene~Cluster, FUN=function(x){paste(x, collapse=", ")}, data=df)
+writeLines(paste0(df$Cluster, ": ", df$Gene))
+# output: "C:\Users\a8799\Desktop\project\2022-10-14_mouse_spatial\doc\2026-01-13_oxidative_phosphorylation.pptx"
+```
+
+#### PL vs AD
+You can refer to the heatmap on the shinyapp.
+
+I now have a matrix: each row is a gene, each column is a brain region, and each value represents the log2(fold change) of that gene in the specific brain region.
+
+Now I need to draw a heatmap that meets the following requirements:
+1. Scale by row, while ensuring that values originally >0 remain >0 and values originally <0 remain <0 after scaling.
+2. Red represents >0 (upregulated), white represents =0, blue represents <0 (downregulated).
+3. Cluster by row.
+
+Please help me write the R code.
+```{r}
+df.merged.sub <- subset(df.merged, comparison == "PLX5622_vs_FADCtrl")
+df.dcast <- dcast(gene~Brain_region, value.var = "log2FoldChange", data=df.merged.sub)
+df.dcast[is.na(df.dcast)] <- 0
+df.dcast <- data.frame(df.dcast[, -1], row.names=df.dcast$gene)
+# Load package
+library(pheatmap)
+# Assume your matrix is called mat (rows = genes, columns = brain regions, values = log2(FC))
+# Step 1: Scale by row but keep the sign unchanged (by dividing by the row's maximum absolute value)
+# This maps each row's values to the [-1,1] range while preserving the sign
+mat_scaled <- df.dcast # Copy the original matrix
+for (i in 1:nrow(mat_scaled)) {
+  row_abs_max <- max(abs(mat_scaled[i, ]), na.rm = TRUE)
+  if (row_abs_max > 0) { # Avoid division by zero
+    mat_scaled[i, ] <- mat_scaled[i, ] / row_abs_max
+  }
+  # If the entire row is 0, it remains 0
+}
+# Step 2: Define colors and breaks to ensure 0 is white, >0 is red, <0 is blue
+my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+# breaks: evenly distributed from -1 to 1, ensuring 0 is in the middle (white)
+my_breaks <- seq(-1, 1, length.out = 101)
+# Step 3: Draw the heatmap and cluster by row
+pheatmap(mat_scaled,
+         scale = "none", # Already manually scaled, do not use built-in scale
+         cluster_rows = TRUE, # Cluster rows
+         cluster_cols = TRUE, # Can be changed to FALSE according to needs
+         color = my_colors,
+         breaks = my_breaks,
+         main = "Heatmap of log2(FC) by Brain Regions",
+         show_rownames = TRUE, # Can be changed to FALSE if there are too many genes
+         show_colnames = TRUE,
+         treeheight_row = 50)
+```
+
+#### Mitochondrial Gene Investigation: DEGs
+```{r}
+library(readxl)
+df.mt <- read_excel("../001ST/000data/Mouse.MitoCarta3.0.xls", sheet = 2)
+df.merged <- read.csv("../001ST/001Giotto_out/003DEGs/DESeq/DESeq_result.sample_br.DEGs.csv", row.names=1)
+df.merged[df.merged$gene %in% df.mt$Symbol, c("baseMean", "log2FoldChange", "padj", "gene", "comparison", "Brain_region")]
+```
+
+### GSEA Analysis
+```{r}
+library(clusterProfiler)
+library(fgsea)
+library(msigdbr) # Used to obtain MSigDB gene sets
+# My experiment has three different treatments (assumed to be a, b, c), and DESeq was used for differential expression analysis with the design parameter "~ treatment + batch". After running the DESeq function, I successfully extracted the differential expression results for c vs b using the results function. However, when I tried to extract the results for b vs a using the same method, I got the error: "Error: subscript contains invalid names". How to solve this?
+dir.create("../001ST/001Giotto_out/003DEGs/GSEA")
+for (BR in setdiff(unique(summed$cell_types), "C12")) {
+  for (CP in c("PLX5622_vs_FADCtrl", "FADCtrl_vs_WTCtrl")) {
+    res_df <- subset(result.list[[BR]], comparison == CP)
+   
+    nrow(res_df)
+    # [1] 18551
+    nrow(na.omit(res_df))
+    # [1] 12614
+   
+    res_df <- na.omit(res_df)
+   
+    if (F) {
+      # It seems there are not many false positives caused by low baseMean, so this step can be skipped.
+      nrow(subset(res_df, baseMean > 10)) # 12614
+      res_df$RANK <- rank(-res_df$baseMean)
+      res_df <- subset(res_df, RANK <= 12000)
+    }
+   
+    gene_list <- res_df$log2FoldChange
+    names(gene_list) <- res_df$gene
+    gene_list <- sort(gene_list, decreasing = TRUE) # From highest upregulated to highest downregulated
+   
+    COLLECT <- "C5"
+   
+    m_df <- msigdbr(species = "Mus musculus", collection = COLLECT)
+   
+    gsea_res4 <- GSEA(
+      geneList = gene_list, # Sorted gene list
+      exponent = 1, # Weight exponent, usually 1
+      minGSSize = 5, # Minimum gene set size (filter out too small sets)
+      maxGSSize = 500, # Maximum gene set size (filter out too large sets)
+      pvalueCutoff = 0.1, # P-value cutoff
+      pAdjustMethod = "BH", # FDR correction method
+      TERM2GENE = data.frame(term = m_df$gs_name,
+                             gene = m_df$gene_symbol) # Or directly use the gene set
+      # Note: Adjust parameters according to the output of `msigdbr`
+    )
+   
+    saveRDS(gsea_res4, paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds"))
+  }
+}
+```
+
+### Organize GSEA Results
+```{r}
+# Organize GSEA results
+df.list <- list()
+n <- 1
+for (CP in c("PLX5622_vs_FADCtrl", "FADCtrl_vs_WTCtrl")) {
+  for (BR in setdiff(unique(summed$cell_types), "C12")) {
+    out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+    gsea_result <- readRDS(out.path)
+    df <- gsea_result@result # [ c("ID", "NES", "qvalue", "core_enrichment")]
+   
+    if (nrow(df) > 0) {
+      df.cols <- colnames(df)
+      df$brain_region <- BR
+      df$comparison <- CP
+      df <- df[, c("brain_region", "comparison", df.cols)]
+      df.list[[n]] <- df
+      n <- n + 1
+    }
+    # p <- gseaplot2(gsea_result, 1:5, pvalue_table = T, pvalue_table_columns = "pvalue")
+    # ggsave("")
+  }
+}
+df.merged <- Reduce(rbind, df.list)
+df.merged <- df.merged[order(df.merged$brain_region,
+                   df.merged$comparison,
+                   df.merged$qvalue), ]
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/st.gsea.csv")
+write.csv(df.merged, out.path)
+```
+
+### Identify Rescued Pathways
+#### Load some functions.
+```{r}
+add_genelist <- function(df) {
+  gl.vec <- c()
+  for (i in 1:nrow(df)) {
+    BR1 <- df[i, "brain_region"]
+    ID1 <- df[i, "ID"]
+    df.sub <- subset(df.merged, ID == ID1 & brain_region == BR1)
+    gl <- unique(unlist(strsplit(df.sub$core_enrichment, "/")))
+    gl.vec[i] <- paste(gl, collapse = ",")
+  }
+  return (gl.vec)
+}
+keep_rows_contain_any_genes <- function(in.df, in.gl, gl.col="genelist", gl.sep=",") {
+  keep.row <- sapply(in.df[[gl.col]], function(x) {
+    gl <- strsplit(x, gl.sep)[[1]]
+    any(gl %in% in.gl)
+  })
+  return(in.df[keep.row, ])
+}
+exclude_rows_contain_any_genes <- function(in.df, in.gl) {
+  keep.row <- sapply(in.df$genelist, function(x) {
+    gl <- strsplit(x, ",")[[1]]
+    !any(gl %in% in.gl)
+  })
+  return(in.df[keep.row, ])
+}
+add_intersect_col <- function(in.df, in.gl, gl.col="genelist", gl.sep=",") {
+  in.df$intersect.genes <- sapply(in.df[[gl.col]], function(x) {
+    gl <- strsplit(x, gl.sep)[[1]]
+    paste(intersect(gl, in.gl), collapse=gl.sep)
+  })
+  return(in.df)
+}
+get_rows_contain_genes_in_df.merged <- function(df.merged, gene.list) {
+  df <- keep_rows_contain_any_genes(df.merged, in.gl = gene.list,
+                            gl.col = "core_enrichment", gl.sep = "/")
+  df <- add_intersect_col(df, gene.list, gl.col = "core_enrichment", gl.sep="/")
+  return(df)
+}
+```
+
+#### Identify Up-regulated Rescued Pathways
+```{r}
+library(reshape2)
+df.merged <- read.csv("../001ST/001Giotto_out/003DEGs/GSEA/st.gsea.csv", row.names=1)
+df.wide <- dcast(ID+brain_region~comparison, value.var = "NES", data=df.merged)
+df.wide.sub <- na.omit(df.wide)
+# Up-rescued pathways?
+df.wide.sub.up_rescued <- subset(df.wide.sub, FADCtrl_vs_WTCtrl < 0 & PLX5622_vs_FADCtrl > 0)
+# Add gene names
+# View the genes contained in pathways of interest
+df.wide.sub.up_rescued$genelist <- add_genelist(df.wide.sub.up_rescued)
+# View(df.wide.sub.up_rescued[order(df.wide.sub.up_rescued$brain_region), ])
+subset(df.wide.sub.up_rescued, ID == "GOCC_RESPIRATORY_CHAIN_COMPLEX")
+subset(df.wide.sub.up_rescued, ID == "GOBP_PROTON_MOTIVE_FORCE_DRIVEN_ATP_SYNTHESIS")
+# Heatmap showing multiple rescued pathways
+# Heatmap: brain region ~ pathway, value = PL vs AD NES
+df.heatmap <- dcast(ID~brain_region, value.var="PLX5622_vs_FADCtrl", data=df.wide.sub.up_rescued)
+df.heatmap <- data.frame(df.heatmap[, -1], row.names=df.heatmap$ID)
+df.heatmap[is.na(df.heatmap)] <- 0
+# Add representative genes for each pathway.
+df.wide.sub.up_rescued.unique <- subset(df.wide.sub.up_rescued, !duplicated(ID))
+mapping <- sapply(df.wide.sub.up_rescued.unique$genelist,
+       function(x) {
+         paste(strsplit(x, ",")[[1]][1:3], collapse=",")
+         })
+names(mapping) <- df.wide.sub.up_rescued.unique$ID
+row.names(df.heatmap) <- paste0(row.names(df.heatmap), " | ", mapping[row.names(df.heatmap)])
+library(pheatmap)
+p <- pheatmap(df.heatmap)
+```
+
+#### Specific Pathway GSEAplot
+```{r}
+# GOCC_RESPIRATORY_CHAIN_COMPLEX
+library(enrichplot)
+pathway <- "GOCC_RESPIRATORY_CHAIN_COMPLEX"
+BR <- "Thalamus"
+CP <- "PLX5622_vs_FADCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", BR, ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+gene.list <- subset(gsea_result@result, ID == pathway)$core_enrichment
+p1 <- gseaplot2(gsea_result, pathway, title=paste0(pathway, "\nin ", BR, "\n", CP),
+          pvalue_table = T, pvalue_table_rownames = NULL)
+CP <- "FADCtrl_vs_WTCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", BR, ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p2 <- gseaplot2(gsea_result, pathway, title=paste0(pathway, "\nin ", BR, "\n", CP),
+          pvalue_table = T, pvalue_table_rownames = NULL)
+pathway <- "GOBP_CARBON_DIOXIDE_TRANSPORT"
+BR <- "Olfactory area"
+CP <- "PLX5622_vs_FADCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p1 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+CP <- "FADCtrl_vs_WTCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p2 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+gene.list <- subset(gsea_result@result, ID == pathway)$core_enrichment
+```
+
+#### Identify Down-regulated Rescued Pathways
+```{r}
+# Down-rescued and microglia-free pathways?
+df.wide.sub.down_rescued <- subset(df.wide.sub, FADCtrl_vs_WTCtrl > 0 & PLX5622_vs_FADCtrl < 0)
+df.wide.sub.down_rescued$genelist <- add_genelist(df.wide.sub.down_rescued)
+nrow(df.wide.sub.down_rescued)
+# [1] 1974
+df.wide.sub.down_rescued <- subset(df.wide.sub.down_rescued, !grepl("C1qa|Trem2|Cd74|H2-Eb1|H2-Q7", df.wide.sub.down_rescued$genelist))
+nrow(df.wide.sub.down_rescued)
+# C1qa|Trem2|Cd74
+# 1870,1322,1008,588,480
+view(df.wide.sub.down_rescued)
+# Brain region-specific down-rescued pathways?
+df <- aggregate(brain_region~ID, FUN=length, data=df.wide.sub.down_rescued)
+df <- subset(df, brain_region == 1)
+df2 <- subset(df.wide.sub.down_rescued, ID %in% df$ID)
+df2 <- df2[order(df2$brain_region), ]
+# Down-rescued pathways containing brain region marker genes? Brain region-specific markers should be identified using WT.
+br.markers <- read.csv("../001ST/001Giotto_out/001preprocess/brain_region_markers_lfc1.csv", row.names=1)
+br.markers.gl <- unique(br.markers$feats)
+df2 <- df2[df2.keep, ]
+# Down-rescued pathways containing neuron-specific marker genes?
+anno.L1.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+neuro.marker <- unique(subset(anno.L1.marker, cluster %in% c("GABA", "Glu") & avg_log2FC > 0.5)$gene)
+if (F) {
+  micro.marker <- unique(subset(anno.L1.marker, cluster == "Micro" & avg_log2FC > 0.5)$gene)
+  df.wide.sub.down_rescued <- subset(df.wide.sub, FADCtrl_vs_WTCtrl > 0 & PLX5622_vs_FADCtrl < 0)
+  df.wide.sub.down_rescued$genelist <- add_genelist(df.wide.sub.down_rescued)
+ 
+  df.sub <- exclude_rows_contain_any_genes(df.wide.sub.down_rescued, micro.marker)
+  nrow(df.sub) # 84
+} else {
+  micro.marker <- unique(subset(anno.L1.marker, cluster == "Micro")$gene)
+  df.wide.sub.down_rescued <- subset(df.wide.sub, FADCtrl_vs_WTCtrl > 0 & PLX5622_vs_FADCtrl < 0)
+  df.wide.sub.down_rescued$genelist <- add_genelist(df.wide.sub.down_rescued)
+ 
+  df.sub <- exclude_rows_contain_any_genes(df.wide.sub.down_rescued, micro.marker)
+  nrow(df.sub) # 14
+}
+if (F) {
+  # Further filtering leaves nothing.
+  df.sub <- keep_rows_contain_any_genes(df.sub, neuro.marker)
+  df.sub <- add_intersect_col(df.sub, neuro.marker)
+}
+library(enrichplot)
+pathway <- "GOMF_NEUROPEPTIDE_RECEPTOR_BINDING"
+BR <- "Isocortex"
+CP <- "FADCtrl_vs_WTCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", BR, ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p2 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+CP <- "PLX5622_vs_FADCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", BR, ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+gene.list <- subset(gsea_result@result, ID == pathway)$core_enrichment
+p1 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+pathway <- "GOMF_HYDROLASE_ACTIVITY_HYDROLYZING_N_GLYCOSYL_COMPOUNDS"
+BR <- "Olfactory area"
+CP <- "FADCtrl_vs_WTCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p1 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+CP <- "PLX5622_vs_FADCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+gene.list <- subset(gsea_result@result, ID == pathway)$core_enrichment
+p2 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+pathway <- "GOMF_CHEMOKINE_ACTIVITY"
+BR <- "Isocortex"
+CP <- "FADCtrl_vs_WTCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p1 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+CP <- "PLX5622_vs_FADCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+gene.list <- subset(gsea_result@result, ID == pathway)$core_enrichment
+p2 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+pathway <- "GOMF_MHC_PROTEIN_BINDING"
+BR <- "Isocortex"
+CP <- "FADCtrl_vs_WTCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p1 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+CP <- "PLX5622_vs_FADCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+gene.list <- subset(gsea_result@result, ID == pathway)$core_enrichment
+p2 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+```
+
+#### Mitochondrial Gene Investigation: PL12 and PL14
+What are the pathways with the highest overlap with PL12 and PL14, and what are the trends of changes between groups?
+```{r}
+df.merged <- read.csv("../001ST/001Giotto_out/003DEGs/GSEA/st.gsea.csv", row.names=1)
+df.merged.sub <- subset(df.merged, grepl("mt-Nd1", df.merged$core_enrichment))
+df.merged.sub <- subset(df.merged, ID=="GOBP_OXIDATIVE_PHOSPHORYLATION", select=c("brain_region", "comparison", "NES", "ID"))
+# Selection criterion 1: Pathways with the highest proportion of mt genes
+# Selection criterion 2: Pathways containing Ndufb and other PL12 genes with the fewest mt genes.
+# Compare the inter-group change patterns of the two types of pathways.
+df.merged.sub <- keep_rows_contain_any_genes(df.merged, "mt-Nd3", gl.col="core_enrichment", gl.sep="/")
+df.merged.sub <- exclude_rows_contain_any_genes(df.merged.sub, "Ndufb7")
+# Pathways with the highest enrichment score with PL12.
+# Pathways with the highest enrichment score with PL14.
+# Compare the inter-group change patterns of the two types of pathways.
+# Help me write a function in R to calculate the Jaccard coefficient of two string vectors
+jaccard_strings <- function(vec1, vec2) {
+  # Convert to unique sets (deduplicate)
+  set1 <- unique(vec1)
+  set2 <- unique(vec2)
+ 
+  # Calculate the size of intersection and union
+  intersection <- length(intersect(set1, set2))
+  union_size <- length(union(set1, set2))
+ 
+  # Jaccard coefficient = intersection / union
+  if (union_size == 0) return(1) # Two empty sets are defined as 1 (can be changed to 0 as needed)
+ 
+  intersection / union_size
+}
+mod.df.list <- readRDS("../001ST/001Giotto_out/007spatial_coexpr/hdWGCNA/wgcna_modules.list.rds")
+PL.df <- mod.df.list$PLX5622
+PL12.gene <- subset(PL.df, module == "PL12")$gene_name
+PL14.gene <- subset(PL.df, module == "PL14")$gene_name
+df.merged$PL12.jaccard <- sapply(df.merged$core_enrichment, function(x) {
+  # y <- strsplit(df.merged.sub$core_enrichment[1], "/")[[1]]
+  y <- strsplit(x, "/")[[1]]
+  jaccard_strings(y, PL12.gene)
+})
+df.merged$PL14.jaccard <- sapply(df.merged$core_enrichment, function(x) {
+  # y <- strsplit(df.merged.sub$core_enrichment[1], "/")[[1]]
+  y <- strsplit(x, "/")[[1]]
+  jaccard_strings(y, PL14.gene)
+})
+# Is PL14 upregulated in AD vs WT?
+df.merged <- df.merged[order(df.merged$PL14.jaccard, decreasing = T), ]
+df.merged.sub <- subset(df.merged, comparison == "FADCtrl_vs_WTCtrl" & PL14.jaccard > 0.2)
+View(df.merged.sub)
+# Answer: Basically downregulated. Only in Fiber tracts.
+df.merged.sub <- subset(df.merged, comparison == "PLX5622_vs_FADCtrl" & PL14.jaccard > 0.2)
+View(df.merged.sub)
+unique(df.merged.sub$brain_region)
+# [1] "Olfactory area" "Striatum" "Meninges" "Thalamus"
+# In PL vs AD, all are upregulated, but cover more brain regions.
+# Now check PL12
+df.merged <- df.merged[order(df.merged$PL12.jaccard, decreasing = T), ]
+df.merged.sub <- subset(df.merged, comparison == "FADCtrl_vs_WTCtrl" & PL14.jaccard < 0.1 & PL12.jaccard > 0.1)
+View(df.merged.sub)
+unique(df.merged.sub$brain_region)
+# [1] "Isocortex" "Fiber tracts" "Hippocampus"
+# All downregulated in AD vs WT, but compared to PL14, it includes more brain regions (hippocampus, cortex).
+df.merged.sub <- subset(df.merged, comparison == "PLX5622_vs_FADCtrl" & PL14.jaccard < 0.1 & PL12.jaccard > 0.1)
+View(df.merged.sub)
+unique(df.merged.sub$brain_region)
+# "Striatum" "Thalamus"
+# All upregulated, mainly including striatum and thalamus.
+#------------------------------------------------------------
+# Plotting: Select representative pathways and draw heatmaps for the two comparison groups separately.
+# 1. Custom color gradient: low (blue) → 0 (white) → high (red)
+my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+# 2. Or more explicitly control the position of 0 (recommended)
+my_breaks <- c(seq(-3, 0, length.out = 50), # Negative values to 0 → blue to white
+               seq(0.0001, 3, length.out = 50)) # Positive values → white to red
+# PL14
+PL14.pathway <- unique(subset(df.merged, PL14.jaccard > 0.3)$ID)
+df.merged.sub <- subset(df.merged, ID %in% PL14.pathway,
+                        select=c("brain_region", "comparison", "ID", "NES"))
+df.merged.sub$brain_region.uniq <- paste0(df.merged.sub$brain_region, ifelse(df.merged.sub$comparison == "FADCtrl_vs_WTCtrl", "1", "2"))
+df.heatmap <- dcast(ID~brain_region.uniq, value.var="NES", data=df.merged.sub)
+df.heatmap <- data.frame(df.heatmap[, -1], row.names=df.heatmap$ID)
+df.heatmap[is.na(df.heatmap)] <- 0
+pheatmap(df.heatmap, color = my_colors, breaks = my_breaks, cluster_cols = F)
+# PL12
+PL12.pathway <- unique(subset(df.merged, PL14.jaccard < 0.1 & PL12.jaccard > 0.1)$ID)
+df.merged.sub <- subset(df.merged, ID %in% PL12.pathway,
+                        select=c("brain_region", "comparison", "ID", "NES"))
+df.merged.sub$brain_region.uniq <- paste0(df.merged.sub$brain_region, ifelse(df.merged.sub$comparison == "FADCtrl_vs_WTCtrl", "1", "2"))
+df.heatmap <- dcast(ID~brain_region.uniq, value.var="NES", data=df.merged.sub)
+df.heatmap <- data.frame(df.heatmap[, -1], row.names=df.heatmap$ID)
+df.heatmap[is.na(df.heatmap)] <- 0
+vec <- colnames(df.heatmap)
+df.heatmap <- df.heatmap[, vec[order(substr(vec, nchar(vec), nchar(vec)))]]
+pheatmap(df.heatmap, color = my_colors, breaks = my_breaks, cluster_cols = F)
+```
+
+### Retrieve Pathways Containing Specific Genes
+```{r}
+df.merged[grepl("Bnc2", df.merged$core_enrichment), ]
+view(df.merged[grepl("Nrp1", df.merged$core_enrichment), ])
+gene.list <- c("Gm41609", "Bnc2", "Mical2", "9630028H03Rik", "Plk2", "Tfap2b",
+                                                 "Rorb", "Plk5", "Pax5", "Rmst", "Gria1")
+get_rows_contain_genes_in_df.merged(df.merged, gene.list)
+view(df %>% filter(brain_region=="Hypothalamus") %>% arrange(qvalue))
+view(get_rows_contain_genes_in_df.merged(df.merged, c("Hcrt")))
+```
+
+### gseaplot
+```{r}
+library(enrichplot)
+pathway <- "GOBP_HYPOTHALAMUS_CELL_DIFFERENTIATION"
+out.path <- "../001ST/001Giotto_out/003DEGs/GSEA/Hypothalamus.PLX5622_vs_FADCtrl.gsea.rds"
+gsea_result <- readRDS(out.path)
+p1 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+# Nrp1/Otp/Ndnf/Nrp2/Nhlh2/Pou3f2
+if (F) {
+  # Not significant
+  out.path <- "../001ST/001Giotto_out/003DEGs/GSEA/Hypothalamus.FADCtrl_vs_WTCtrl.gsea.rds"
+  gsea_result <- readRDS(out.path)
+  p2 <- gseaplot2(gsea_result, pathway, title=pathway,
+            pvalue_table = T, pvalue_table_rownames = NULL)
+}
+# pathway <- "GOMF_MHC_PROTEIN_BINDING"
+BR <- "Hypothalamus"
+CP <- "PLX5622_vs_FADCtrl"
+out.path <- paste0("../001ST/001Giotto_out/003DEGs/GSEA/", make.names(BR), ".", CP, ".gsea.rds")
+gsea_result <- readRDS(out.path)
+p1 <- gseaplot2(gsea_result, pathway, title=pathway,
+          pvalue_table = T, pvalue_table_rownames = NULL)
+# GOBP_WNT_SIGNALING_PATHWAY
+# GOBP_REGULATION_OF_WNT_SIGNALING_PATHWAY
+# GOBP_REGULATION_OF_WNT_SIGNALING_PATHWAY
+```

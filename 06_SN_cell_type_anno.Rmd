@@ -1,0 +1,1332 @@
+---
+editor_options: 
+  markdown: 
+    wrap: 72
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+# Annotation Based on Markers
+
+## Report
+
+C:\Users\a8799\Desktop\project\2022-10-14_mouse_spatial\002SC\004Seurat_out\Chuhao_Li_2025-12-25_Single_Nucleus_Re-analysis.pptx
+
+## Draw Cell Marker Expression Plot
+
+```{r}
+# dhlab
+library(Seurat)
+
+dir.create("004Seurat_out/002cell_type_anno")
+sobj <- readRDS("004Seurat_out/001filter_and_integrate/sobj.rds")
+
+df.marker <- read.csv("000data/cellstar.expr.csv")
+
+# marker.expr <- cbind(sobj@meta.data, t(as.matrix(sobj@assays$RNA@data[df.marker$gene, ])))
+# write.csv(marker.expr, "004Seurat_out/002cell_type_anno/marker.expr.csv")
+
+# thinkpad
+# marker.expr <- read.csv("../002SC/004Seurat_out/002cell_type_anno/marker.expr.csv", row.names=1)
+
+p <- DotPlot(sobj, features=df.marker$gene, cluster.idents=T)
+
+# Add vertical dashed lines
+pos.vec <- c()
+ct <- "Astro"
+for (i in 1:nrow(df.marker)){
+  this.ct <- df.marker[i, "label"]
+  if (ct != this.ct) {
+    pos.vec <- c(pos.vec, i)
+    ct <- this.ct
+  }
+}
+
+for (i in pos.vec) {
+  p <- p + geom_vline(xintercept=i-0.5, linetype="dashed", colour="grey")
+}
+
+# Add horizontal dashed lines
+# for (i in c(1,2,3,5,6,8,13,25)) {
+#   p <- p + geom_hline(yintercept=i+0.5, linetype="dashed", colour="grey")
+# }
+
+# Add x-axis bands
+# bar.size = 3
+# bar.pos = -2
+# bar.margin = 0.2
+# last.i <- 0
+# for (i in pos.vec) {
+#   p <- p + annotate("segment", x=last.i, xend=i-0.5, 
+#                          y=bar.pos, 
+#                          yend=bar.pos)
+#   last.i <- i
+# }
+# 
+p <- p + labs(x="Cell marker genes", y="Cluster name") +
+  theme(text=element_text(family="Arial", size=18),
+        axis.text.x=element_text(size=16, angle=40, vjust = 0.7),
+        axis.text.y=element_text(size=18))
+
+
+ggsave("004Seurat_out/002cell_type_anno/cellstar.expr.dotplot.jpg", p, width=21, height=15)
+
+# Based on this plot, create a cluster annotation table and save as cell_annotation.L2.csv
+
+# Remove two sub-clusters with Oligo contamination: 19 and 22.
+
+sobj.sub <- subset(sobj, idents=setdiff(sobj$seurat_clusters, c(19,22)))
+
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/002cell_type_anno/cellstar.expr.dotplot.jpg")
+```
+
+## Draw Cell Annotation UMAP Plot
+
+```{r}
+# env: dhlab
+anno.df <- read.csv("004Seurat_out/002cell_type_anno/cell_annotation.L2.csv")
+
+mapping <- anno.df$anno.L1
+names(mapping) <- anno.df$cluster
+sobj.sub$anno.L1 <- mapping[sobj.sub$seurat_clusters]
+
+mapping <- anno.df$anno.L2
+names(mapping) <- anno.df$cluster
+sobj.sub$anno.L2 <- mapping[sobj.sub$seurat_clusters]
+
+Idents(sobj.sub) <- "anno.L2"
+
+saveRDS(sobj.sub, "004Seurat_out/002cell_type_anno/sobj.rds")
+
+p1 <- DimPlot(sobj.sub, reduction = "umap", group.by = "anno.L2", label=T, combine=F)
+ggsave("004Seurat_out/002cell_type_anno/umap.anno.L2.png", p1, width=10, height=8, dpi=300)
+
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/002cell_type_anno/umap.anno.L2.png")
+```
+
+## Markers at L1, L2, and L3 levels
+
+I am performing single-cell data analysis. Suppose I have 3 groups, each with 2 samples, but these samples were sequenced in two batches. Now I want to use the MAST method in FindMarkers to identify cluster marker genes. Can I pass both sample and batch variables when filling in latent.vars?
+
+```{r}
+
+library(future)
+plan("multisession", workers = 40)
+
+for (LEVEL in c("anno.L1", "anno.L2", "anno.L3")) {
+  # LEVEL <- "anno.L3"
+  Idents(sobj) <- LEVEL
+  df.marker <- FindAllMarkers(sobj, 
+                   test.use="MAST", 
+                   latent.vars=c("batch"), 
+                   only.pos=T)
+
+  write.csv(df.marker,
+            paste0("004Seurat_out/002cell_type_anno/", LEVEL, ".FindAllMarkers.csv"))
+}
+```
+
+## Cell Type Specific Genes
+
+Areas that may need re-annotation:
+
+- Endo may contain astrocytes.
+- Glu_5 may contain both GABA and Glu.
+
+```{r}
+
+marker.L1 <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+marker.L1 <- subset(marker.L1, p_val_adj < 0.05)
+
+```
+
+### Ambient genes contributed by different major cell categories
+
+```{r}
+ambient_genes <- readLines("../002SC/004Seurat_out/001filter_and_integrate/decontx/ambient.genes.list")
+
+marker.L1$is.ambient <- marker.L1$gene %in% ambient_genes
+
+table(marker.L1$cluster)
+# Astro Endo-Others        GABA         Glu       Micro       Oligo         OPC 
+#   673          33         498         935         752         600         547 
+
+table(subset(marker.L1, is.ambient)$cluster)
+
+# Astro Endo-Others        GABA         Glu       Micro       Oligo         OPC 
+#   254          27         429         836         242         334         284 
+
+head(subset(marker.L1, is.ambient & cluster=="Micro"), 20)
+#               p_val avg_log2FC pct.1 pct.2 p_val_adj cluster          gene is.ambient
+# Inpp5d            0   1.932639 0.919 0.036         0   Micro        Inpp5d       TRUE
+# Mertk1            0   1.882423 0.916 0.060         0   Micro         Mertk       TRUE
+# Tgfbr1            0   1.774789 0.899 0.125         0   Micro        Tgfbr1       TRUE
+# Lrmda2            0   1.654317 0.869 0.169         0   Micro         Lrmda       TRUE
+# Hexb              0   1.632975 0.873 0.174         0   Micro          Hexb       TRUE
+# Ccnd31            0   1.464347 0.737 0.099         0   Micro         Ccnd3       TRUE
+# Epb41l21          0   1.404170 0.806 0.232         0   Micro       Epb41l2       TRUE
+# Pag1              0   1.355840 0.833 0.316         0   Micro          Pag1       TRUE
+# Ctsd              0   1.334229 0.755 0.220         0   Micro          Ctsd       TRUE
+# Zfhx32            0   1.281278 0.838 0.289         0   Micro         Zfhx3       TRUE
+# Rreb11            0   1.276132 0.746 0.214         0   Micro         Rreb1       TRUE
+# Tmcc32            0   1.256758 0.877 0.406         0   Micro         Tmcc3       TRUE
+# Lyn               0   1.248275 0.742 0.264         0   Micro           Lyn       TRUE
+# Plxdc21           0   1.241443 0.954 0.592         0   Micro        Plxdc2       TRUE
+# Hpgds             0   1.239032 0.713 0.197         0   Micro         Hpgds       TRUE
+# Pde3b             0   1.238069 0.782 0.341         0   Micro         Pde3b       TRUE
+# E230029C05Rik     0   1.209179 0.685 0.240         0   Micro E230029C05Rik       TRUE
+# Ankrd44           0   1.117041 0.719 0.288         0   Micro       Ankrd44       TRUE
+# Ivns1abp          0   1.103867 0.730 0.352         0   Micro      Ivns1abp       TRUE
+# Sirpa             0   1.094755 0.745 0.368         0   Micro         Sirpa       TRUE
+
+gl <- strsplit("Selplg, Gm10790, Cacnb2, Myo1e, Fgf13, Plxdc2", ", ")[[1]]
+subset(marker.L1, gene %in% gl)
+#        p_val avg_log2FC pct.1 pct.2 p_val_adj cluster  gene is.ambient
+# Fgf13      0  0.5088824 0.575 0.353         0    GABA Fgf13       TRUE
+# Fgf131     0  0.7971353 0.542 0.405         0   Micro Fgf13       TRUE
+```
+
+
+
+## Subtype Clustering and Annotation
+
+During single-cell analysis, cells were classified at a resolution of 0.3. Now, I want to divide cells into subtypes. Should I use a higher resolution on the original embedding, or extract specific cell types and recalculate a new embedding for clustering?
+
+```{r}
+
+library("harmony")
+
+# sobj <- readRDS("004Seurat_out/002cell_type_anno/sobj.rds")
+sobj <- sobj.sub 
+
+Idents(sobj) <- "anno.L2"
+outdir <- "004Seurat_out/002cell_type_anno/cluster.L3"
+
+if (!dir.exists(outdir)) {dir.create(outdir)}
+
+subclusters.list <- list()
+anno <- "anno.L2"
+clus.resolution <- 0.3
+cluster.name <- paste0("nn_res.", clus.resolution)
+
+for (ct in unique(sobj$anno.L2)){
+  print(paste("running", ct, "..."))
+
+  ct.sub <- subset(sobj, idents=ct)
+  DefaultAssay(ct.sub) <- "RNA"
+  ct.sub <- ScaleData(ct.sub)
+  ct.sub <- FindVariableFeatures(ct.sub) %>%
+            RunPCA(npcs = 30, reduction.name="pca") %>%
+            RunHarmony(c("orig.ident", "batch")) %>%
+            RunUMAP(reduction = "harmony", dims = 1:30, reduction.name="umap") %>%
+            FindNeighbors(reduction = "harmony", dims = 1:30, graph.name="nn") %>%
+            FindClusters(resolution = clus.resolution, graph.name="nn") # 0.5 is too high.
+
+  subclusters.list[[ct]] <- ct.sub
+  
+  ct.name <- make.names(ct)
+
+  p1 <- DimPlot(ct.sub, reduction = "umap", group.by=cluster.name,
+                label = TRUE, repel = TRUE, pt.size=1, combine=F)
+  ggsave(paste0(outdir, "/", ct.name, ".dimplot_grouped_by_cluster.png"), p1, width=10, height=9)
+  # ... (plotting code)
+}
+
+# Store results after sub-clustering
+
+for (i in names(subclusters.list)) {
+  saveRDS(subclusters.list[[i]], paste0("004Seurat_out/002cell_type_anno/cluster.L3/sobj.", i, ".rds"))
+}
+
+# Write sub-clustering results back to metadata.
+cellId2L3 <- lapply(subclusters.list, function(x){
+  y <- paste0(x$anno.L2, "_", x$nn_res.0.3)
+  names(y) <- row.names(x@meta.data)
+  return(y)
+})
+
+names(cellId2L3) <- NULL
+cellId2L3 <- do.call(c, cellId2L3)
+sobj$anno.L3 <- cellId2L3[row.names(sobj@meta.data)]
+write.csv(sobj@meta.data, "004Seurat_out/002cell_type_anno/cluster.L3/sobj.meta.anno.L3.csv")
+
+saveRDS(sobj, "004Seurat_out/002cell_type_anno/sobj.rds")
+```
+
+### L3 level markers relative to L2
+
+```{r}
+# Calculate marker genes
+for (ct in names(subclusters.list)) {
+  cat(ct, "\n")
+  df.marker <- FindAllMarkers(subclusters.list[[ct]], 
+                     test.use="MAST", 
+                     latent.vars=c("orig.ident", "batch"), 
+                     only.pos=T)
+
+  write.csv(df.marker, paste0("004Seurat_out/002cell_type_anno/cluster.L3/", ct, ".marker.csv"))
+}
+
+```
+
+### Remove Oligo doublets based on L3 vs L2 level markers
+
+EDA
+
+```{r}
+ct <- "Micro"
+df.marker <- read.csv(paste0("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/", ct, ".marker.csv"), row.names=1)
+
+subset(df.marker, gene %in% c("Mbp", "Mog", "Plp1")) # empty
+
+ct <- "Astro"
+df.marker <- read.csv(paste0("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/", ct, ".marker.csv"), row.names=1)
+
+subset(df.marker, gene %in% c("Mbp", "Mog", "Plp1"))
+```
+
+
+```{r}
+# env: dhlab
+
+
+# Remove clusters highly expressing Oligo markers: c("Mbp", "Mog", "Plp1")
+# Removal criterion: marker genes of a specific cluster include these three genes. First check the proportion; if it's small, remove it directly.
+
+Oligo.clusters <- c()
+
+for (ct in names(subclusters.list)) {
+  if (ct == "Oligo" | ct == "OPC") next
+  df.marker <- read.csv(paste0("004Seurat_out/002cell_type_anno/cluster.L3/", ct, ".marker.csv"), row.names=1)
+  df.count <- table(subclusters.list[[ct]]$nn_res.0.3)
+
+  df.Oligo_marker <- subset(df.marker, gene %in% c("Mbp", "Mog", "Plp1"))
+  
+  Oligo.cluster <- unique(df.Oligo_marker$cluster)
+  
+  if (nrow(df.Oligo_marker) == 3 & length(Oligo.cluster) == 1) {
+    Oligo.ratio <- df.count[Oligo.cluster] / sum(df.count)
+    cat(ct, ":", Oligo.ratio, "\n")
+    Oligo.clusters <- c(Oligo.clusters, paste0(ct, "_", Oligo.cluster))
+  } else {
+     cat(ct, ": Oligo free", "\n")
+  }
+}
+
+# ... (results summary)
+
+
+Oligo.clusters
+# [1] "GABA_3_5" "Astro_3"  "Glu_7_2"  "Glu_10_3"
+
+# Remove.
+Idents(sobj) <- "anno.L3"
+sobj.sub <- subset(sobj, idents=setdiff(unique(sobj$anno.L3), Oligo.clusters))
+Idents(sobj.sub) <- "anno.L2"
+
+saveRDS(sobj.sub, "004Seurat_out/002cell_type_anno/sobj.rds")
+write.csv(sobj.sub@meta.data, "004Seurat_out/002cell_type_anno/sobj.meta.csv")
+```
+
+## Draw Final Cell Annotation UMAP Plot
+
+```{r}
+
+sobj <- sobj.sub 
+
+p1 <- DimPlot(sobj, reduction = "umap", group.by = "anno.L2", label=T, combine=F)
+ggsave("004Seurat_out/002cell_type_anno/umap.anno.L2.final.png", p1, width=10, height=8, dpi=300)
+
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/002cell_type_anno/umap.anno.L2.final.png")
+```
+
+## Draw Final Cell Annotation DotPlot
+
+```{r cellstar-expr-dotplot-final-jpg}
+# env: dhlab-17
+
+library(Seurat)
+setwd("/home/mouse_ad/002SC")
+sobj <- readRDS("004Seurat_out/002cell_type_anno/sobj.rds")
+
+Idents(sobj) <- "anno.L2"
+
+df.marker <- read.csv("000data/cellstar.expr.csv")
+
+p <- DotPlot(sobj, features=df.marker$gene, cluster.idents=T, dot.scale = 3)
+
+# Add vertical dashed lines
+pos.vec <- c()
+ct <- "Astro" # Initialize ct
+for (i in 1:nrow(df.marker)){
+  this.ct <- df.marker[i, "label"]
+  if (ct != this.ct) {
+    pos.vec <- c(pos.vec, i)
+    ct <- this.ct
+  }
+}
+
+for (i in pos.vec) {
+  p <- p + geom_vline(xintercept=i-0.5, linetype="dashed", colour="grey")
+}
+
+# Add horizontal dashed lines
+# for (i in c(1,2,3,5,6,8,13,25)) {
+#   p <- p + geom_hline(yintercept=i+0.5, linetype="dashed", colour="grey")
+# }
+
+# Add x-axis bands
+# ... (band annotation code)
+
+p <- p + labs(x="Cell marker genes", y="Cluster name") +
+  theme_nature() + 
+  theme(axis.title.x=element_blank(), 
+        axis.text.x=element_text(face="italic", angle=45, size=6, hjust=1), 
+        legend.title=element_blank())
+
+
+# ggsave("004Seurat_out/002cell_type_anno/cellstar.expr.dotplot.final.jpg", p, width=21, height=15)
+ggsave("004Seurat_out/002cell_type_anno/cellstar.expr.dotplot.final.pdf", 
+       p, width=7.5, height=4.5, device=cairo_pdf)
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/002cell_type_anno/cellstar.expr.dotplot.final.jpg")
+```
+
+
+## Cell Type Exploration
+
+Explore different cell types:
+
+1. Identify low-quality cell types.
+2. Annotate cell types.
+3. Identify cell types with differences between treatments (cell proportions, differentially expressed genes).
+
+### General Functions
+
+#### Sub-clusters with too few cells
+
+1. Mark sub-clusters with too few cells. Judgment criterion: at least two individuals in one treatment group have more than 5 cells.
+
+input: 
+  - `sobj.meta`, a dataframe. Each row is a cell. Mainly contains three columns: orig.ident, treatment, and anno.L3.
+
+Tasks:
+  - Operate using R's dplyr.
+  - Group by orig.ident (sample) and anno.L3 (cell subtype), count the number of each cell subtype per sample.
+  - Mark cell subtypes where at least one treatment group has two individuals with cell count > 5.
+
+output: 
+  - A dataframe with two columns: cell subtype and its sufficiency status. Empty if sufficient, "low n cell" if not.
+
+
+```{r}
+# 1. Mark sub-clusters with too few cells.
+
+sobj.meta <- read.csv("../002SC/004Seurat_out/002cell_type_anno/sobj.meta.csv", row.names=1)
+
+# Suppose sobj.meta exists
+# 1. Calculate cell count for each subtype in each sample, retaining treatment info
+counts_df <- sobj.meta %>%
+  group_by(orig.ident, treatment, anno.L3) %>%
+  summarise(cell_count = n(), .groups = "drop")
+
+# 2. Logic judgment:
+#    - First check if each sample > 5
+#    - Within each treatment group, count if number of samples meeting condition >= 2
+#    - Finally check if the subtype meets the criteria in ANY one treatment group
+status_df <- counts_df %>%
+  group_by(treatment, anno.L3) %>%
+  summarise(
+    # Number of individuals in current treatment group with cell count > 5
+    n_individuals_above_5 = sum(cell_count > 5),
+    .groups = "drop"
+  ) %>%
+  group_by(anno.L3) %>%
+  summarise(
+    # Is there at least one group where two individuals > 5
+    is_sufficient = any(n_individuals_above_5 >= 2),
+    .groups = "drop"
+  )
+
+# 3. Format output: empty if requirement met, "low n cell" if not
+output <- status_df %>%
+  mutate(status = ifelse(is_sufficient, "", "low n cell")) %>%
+  select(anno.L3, status)
+
+# Check results, 18 "low n cell".
+print(output)
+
+# ... (print results)
+
+```
+
+#### Sub-clusters heavily affected by ambient RNA
+
+2. Mark sub-clusters heavily affected by ambient RNA. Judgment criterion: marker genes are major ambient genes.
+
+input: 
+- df.ambient_genes: dataframe. Column `` is gene symbol, column `` is ambient RNA abundance rank. Ranks closer to 1 indicate higher abundance in ambient RNA.
+- df.marker: dataframe. Cell subtype marker gene table. Column `cluster` is cell subtype, column `` contains marker genes. One subtype has multiple marker genes, sorted by p-value.
+
+Tasks:
+- Determine ambient risk genes:
+  - Top 1000.
+  - Top 1000 in any sample.
+  - Only judge for glial cells. If it contains top X cluster markers of neurons, it's determined as an ambient gene.
+  - Belongs to outliers or above in any sample (√).
+- If top 3 marker genes contain ambient risk genes, mark the corresponding gene symbol in the output.
+
+output: 
+- dataframe, rows are anno.L3 cell subtypes. Columns are information to be marked.
+
+```{r}
+ambient_genes <- readLines("../002SC/004Seurat_out/001filter_and_integrate/decontx/ambient.genes.list")
+
+marker.L1 <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+marker.L1 <- subset(marker.L1, p_val_adj < 0.05)
+
+# Micro
+df.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Micro.marker.csv", row.names=1)
+subcluster.top3 <- df.marker %>% group_by(cluster) %>% slice_head(n=3)
+
+micro.ambient <- setdiff(ambient_genes, subset(marker.L1, cluster=="Micro")$gene)
+
+subcluster.top3$is.ambient_gene <- subcluster.top3$gene %in% micro.ambient
+
+# Astro
+df.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Astro.marker.csv", row.names=1)
+subcluster.top3 <- df.marker %>% group_by(cluster) %>% slice_head(n=3)
+ct.ambient <- setdiff(ambient_genes, subset(marker.L1, cluster=="Astro")$gene)
+subcluster.top3$is.ambient_gene <- subcluster.top3$gene %in% ct.ambient
+
+# GABA_0
+df.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/GABA_0.marker.csv", row.names=1)
+subcluster.top3 <- df.marker %>% group_by(cluster) %>% slice_head(n=3)
+ct.ambient <- setdiff(ambient_genes, subset(marker.L1, cluster=="GABA")$gene)
+subcluster.top3$is.ambient_gene <- subcluster.top3$gene %in% ct.ambient
+
+# Confirm key differential genes are not ambient genes.
+intersect(c("Bnc2", "Lepr", "Tfap2b"), ambient_genes) # character(0)
+```
+
+### Micro explore
+
+#### quality control
+
+```{r}
+library(Seurat)
+library(ggplot2)
+sobj.sub <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.rds")
+sobj.sub$UMAP_1 <- NULL
+sobj.sub$UMAP_2 <- NULL
+
+p <- DimPlot(sobj.sub, group.by = "treatment") + scale_color_manual(values = c(AD_5622="blue", AD_ctrl="red", WT_ctrl="green"))
+
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.DimPlot_by_treatment.png", p,
+       width=10.91, height = 9.08, dpi=300)
+
+brain_main <- read.csv("../002SC/000data/cellstar.expr.csv")
+p <- DotPlot(sobj.sub, brain_main$gene) + coord_flip() + ggtitle("brain main CT markers")
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.brain_main.Dotplot.png", p,
+       width=5.18, height = 8.55, dpi=300)
+
+p <- VlnPlot(sobj.sub, features = "nFeature_RNA")
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.nFeature_RNA.png", p,
+       width=4.84, height = 4.48, dpi=300)
+
+p <- ggplot(sobj.sub@meta.data, aes(nn_res.0.3)) + geom_bar() + geom_hline(yintercept = 50)
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.count.png", p,
+       width=4.84, height = 4.48, dpi=300)
+
+# 绘制decontX plot
+sobj.meta <- read.csv("../002SC/004Seurat_out/002cell_type_anno/sobj.meta.ambient.csv", row.names=1)
+sobj.sub$ambientRNA <- sobj.meta[row.names(sobj.sub@meta.data), "ambientRNA"]
+
+FeaturePlot(sobj.sub, "ambientRNA")
+
+VlnPlot(sobj.sub, "ambientRNA")
+
+# 没有哪个亚型的ambientRNA比例特别大
+
+```
+
+
+#### Subtype Annotation
+
+
+
+
+
+```{r}
+# thinkpad
+
+# Cluster marker genes
+
+df.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L2.FindAllMarkers.csv", row.names=1)
+
+df.marker.sub <- subset(df.marker, cluster == "Micro")
+
+p <- DotPlot(sobj.sub, df.marker.sub$gene[1:20]) + coord_flip()
+
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.cluster_marker.png", p,
+       width=5.56, height = 5.05, dpi=300)
+
+# Sub-cluster marker genes
+library(dplyr)
+
+df.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Micro.marker.csv", row.names=1)
+
+subcluster.top3 <- df.marker %>% group_by(cluster) %>% slice_head(n=3)
+
+p <- DotPlot(sobj.sub, subcluster.top3$gene) + coord_flip()
+
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.subcluster_marker.png", p,
+       width=6.10, height = 6.03, dpi=300)
+
+# Check if marker genes are due to ambient RNA.
+
+gene.rank_by_ambient <- read.csv("../002SC/004Seurat_out/001filter_and_integrate/decontx/gene.rank_by_ambient.csv", row.names=1)
+
+gene.rank_by_ambient[subcluster.top3$gene, ]
+
+# Sub-cluster marker genes for specific samples
+
+for (s in unique(sobj.sub$orig.ident)) {
+  sobj.sub.sub <- subset(sobj.sub, orig.ident ==s)
+  p <- DotPlot(sobj.sub.sub, subcluster.top3$gene) + labs(title=s) + coord_flip()
+  out.path <- paste0("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.subcluster_marker.", s, ".png")
+  ggsave(out.path, p,
+         width=6.10, height = 6.03, dpi=300)
+}
+
+# Classic subtype markers
+# Except for 0 and 1, other genes are unfamiliar.
+# 0 corresponds to HOM, 1 corresponds to DAM.
+
+DAM.markers <- c("Trem2", "Tyrobp", "Apoe", "Lpl", "Cst7", "Igf1")
+HOM.markers <- c("P2ry12", "Tmem119", "Cx3cr1", "Cd11b", "Itgam", "Sall1", "Cd33")
+macrophage.markers <- c("Mrc1", "Cd163", "Mafb", "Lyve1", "H2-Ab1", "H2-Aa")
+
+p <- DotPlot(sobj.sub, c(DAM.markers, HOM.markers, macrophage.markers)) + coord_flip() + theme(axis.title.y=element_blank())
+
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Micro.classic_subtype_markers.png", p,
+       width=5.56, height = 5.05, dpi=300)
+
+subset(df.marker, gene %in% c("Spi1", "Cd28")) # None
+
+subset(df.marker, gene %in% c("Trem2", "Tyrobp", "Apoe", "Lpl", "Cst7", "Igf1")) # Trem2: cluster 1
+
+subset(df.marker, gene %in% c("P2ry12", "Tmem119", "Cx3cr1", "Cd11b", "Itgam", "Sall1", "Cd33")) # Tmem119: cluster 0
+
+subset(df.marker, gene %in% c("Mrc1", "Cd163", "Mafb", "Lyve1", "H2-Ab1", "H2-Aa")) # Peripheral macrophages: cluster 8
+```
+
+### GABAergic Neuron Exploration
+
+#### L2 level markers relative to L1
+
+```{r}
+# Compared to other GABAergic neurons, what genes does GABA_0 highly express?
+# What is the brain region distribution?
+# What cell subtypes are included?
+
+sobj <- readRDS("004Seurat_out/002cell_type_anno/sobj.rds")
+
+Idents(sobj) <- "anno.L1"
+
+for (CT in c("GABA", "Glu")) {
+  CT <- "Glu"
+  sobj.sub <- subset(sobj, idents=CT)
+
+  Idents(sobj.sub) <- "anno.L2"
+
+  df.marker <- FindAllMarkers(sobj.sub, 
+                     test.use="MAST", 
+                     latent.vars=c("orig.ident", "batch"), 
+                     only.pos=T)
+  dir.create(paste0("004Seurat_out/002cell_type_anno/", CT))
+
+  write.csv(df.marker, paste0("004Seurat_out/002cell_type_anno/", 
+                              CT, "/", CT, ".FindAllMarkers.csv"))
+}
+
+# 13: In .nextMethod(object = object, value = value) :
+#   Coefficients batch2, batch3, batch4 are never estimible and will be dropped.
+```
+
+
+#### GABA Subtype Marker Pathway Enrichment Analysis
+
+```{r}
+# Load data
+
+CT <- "GABA"
+
+df.marker <- read.csv(paste0("../002SC/004Seurat_out/002cell_type_anno/", 
+                              CT, "/", CT, ".FindAllMarkers.csv"), row.names=1)
+
+# Take only subtype-specific genes
+
+a <- table(df.marker$gene)
+
+b <- names(a[a == 1])
+
+df.marker2 <- subset(df.marker, gene %in% b)
+
+# Organize format
+
+df.marker.agg <- aggregate(gene~cluster, 
+                           FUN=function(x) {paste(x, collapse=",")}, 
+                           data=df.marker2)
+
+out.path <- paste0("../002SC/004Seurat_out/002cell_type_anno/", 
+                              CT, "/", CT, ".subtype_markers.txt")
+
+write.table(df.marker.agg, out.path, quote=F, col.names = F, sep="\t", row.names=F)
+```
+
+
+#### GABA Subtype Top 10 Markers
+
+```{r}
+rm(list = ls(all = TRUE))
+gc() 
+
+library(Seurat)
+library(dplyr)
+sobj <- readRDS("002SC/004Seurat_out/002cell_type_anno/sobj.rds")
+Idents(sobj) <- "anno.L2"
+sobj.sub <- subset(sobj, anno.L1=="GABA")
+
+CT <- "GABA"
+
+df.marker <- read.csv(paste0("002SC/004Seurat_out/002cell_type_anno/", 
+                              CT, "/", CT, ".FindAllMarkers.csv"), row.names=1)
+
+# Take only subtype-specific genes
+a <- table(df.marker$gene)
+b <- names(a[a == 1])
+df.marker2 <- subset(df.marker, gene %in% b)
+
+
+top10 <- df.marker2 %>% group_by(cluster) %>% slice_head(n=10)
+
+p <- DotPlot(sobj.sub, features=top10$gene, dot.scale = 3) + theme_nature() + theme(axis.text.x=element_text(angle=45))
+
+out.path <- paste0("002SC/004Seurat_out/002cell_type_anno/", 
+                              CT, "/", CT, ".top10_markers.png")
+
+ggsave(out.path, p, width=10, height=3)
+
+```
+
+#### GABA_0 Subtype Cell Counts
+
+```{r}
+sobj.meta <- read.csv("../002SC/004Seurat_out/002cell_type_anno/sobj.meta.csv", row.names=1)
+
+sobj.meta.sub <- subset(sobj.meta, anno.L2 == "GABA_0")
+
+table(sobj.meta.sub$orig.ident, sobj.meta.sub$anno.L3)
+
+```
+
+
+#### GABA Annotation: Classic Neuron Markers
+
+From current results, neuron classification seems based more on anatomical structures rather than classic local circuit types (Sst, Vip, Pvalb, etc.). Further clustering within specific brain regions might reveal these classic subtypes.
+
+Why are there no GABAergic neurons in the thalamus? Are some GABAergic neurons assigned to Glu? Glu_5? Glu_5 and Glu_7 indeed express lower Glu markers.
+
+Why are there so few DEGs identified at the single-nucleus level between treatments? Perhaps cell classification is suboptimal. Assuming treatment differences are concentrated in specific neuron subtypes or subtypes with higher Aβ. However, our current neuron classification is mainly based on brain region anatomy. This leads to treatment difference signals being dispersed across brain regions, failing to enrich. If neurons could be classified by subtype and specific brain regions, identifying treatment differences for each category might yield new information.
+
+GABA_1_0 and GABA_1_6 highly express Pvalb.
+
+
+```{r}
+
+L1.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
+L1.marker$marker_set <- "anno.L1_marker"
+
+L2.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L2.FindAllMarkers.csv", row.names=1)
+L2.marker$marker_set <- "anno.L2_marker"
+
+# L2toL1.marker <- read.csv("../002SC/004Seurat_out/002cell_type_anno/GABA/GABA.FindAllMarkers.csv", row.names = 1)
+# L2toL1.marker$marker_set <- "L2toL1_marker"
+
+# L3.marker
+L3toL2.marker.list <- list()
+for (CT in c("GABA_0", "GABA_1", "GABA_2", "GABA_3")) {
+  df <- read.csv(paste0("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/", CT, ".marker.csv"), row.names=1) 
+  df$cluster <- paste0(CT, "_", df$cluster)
+  L3toL2.marker.list[[CT]] <- df
+}
+
+L3.marker <- Reduce(rbind, L3toL2.marker.list)
+L3.marker$marker_set <- "anno.L3_marker"
+
+sn.marker <- rbind(L1.marker, L2.marker, L3.marker)
+
+# First check if your clusters highly express Gad1 or Gad2, which is the basis for confirming them as GABAergic neurons
+
+# Question 1: Where are the Pvalb+ neurons?
+gaba.markers <- subset(sn.marker, gene %in% c("Pvalb", "Sst", "Vip", "Gad1", "Gad2"))
+
+gaba.markers <- gaba.markers[order(gaba.markers$marker_set, gaba.markers$gene), ]
+
+gaba.markers
+```
+
+
+#### GABA cluster marker
+
+```{r}
+
+library(dplyr)
+L2.marker.sub <- subset(L2.marker, grepl("GABA", cluster))
+
+L2.marker.sub %>% group_by(cluster) %>% slice_head(n=10)
+
+```
+
+
+#### Do Neuronal Subtypes with the Highest Correlation to Aβ Distribution Show Greater Proportion Changes?
+
+##### Load Functions
+
+Is there an R package that can achieve the following: given a dataframe, calculate Spearman correlation coefficients and p-values between specified columns (allowing multiple columns), and return a dataframe with five columns: `col1`, `col2`, `coefficient`, `pvalue`, `padj`? If not, please help me write one.
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+calculate_spearman <- function(data, cols, method = "spearman", p_adjust_method = "BH") {
+  # Parameter description:
+  # data: input dataframe
+  # cols: vector of column names to compute correlations, e.g., c("gene1", "gene2", "gene3")
+  # method: correlation method, default is 'spearman'. Can be changed to 'pearson' or 'kendall'
+  # p_adjust_method: p-value adjustment method, default is "BH" (FDR). Other options include "holm", "hochberg", "bonferroni", etc.
+  
+  # 1. Generate all pairwise combinations of columns
+  col_pairs <- combn(cols, 2, simplify = FALSE)
+ 
+  # 2. Compute Spearman correlation and p-value for each pair
+  results <- lapply(col_pairs, function(pair) {
+    test_result <- cor.test(data[[pair[1]]],
+                            data[[pair[2]]],
+                            method = method)
+   
+    tibble(
+      col1 = pair[1],
+      col2 = pair[2],
+      coefficient = test_result$estimate,
+      pvalue = test_result$p.value
+    )
+  }) %>% bind_rows()
+ 
+  # 3. Adjust p-values for multiple testing
+  results$padj <- p.adjust(results$pvalue, method = p_adjust_method)
+ 
+  # 4. Sort by absolute correlation coefficient (optional, for better readability)
+  results <- results %>% arrange(desc(abs(coefficient)))
+ 
+  return(results)
+}
+```
+
+The function above calculates all pairwise combinations. However, I only want to compare one or two specific columns with all other columns to reduce unnecessary computation. Please optimize the function above.
+
+```{r}
+library(dplyr)
+
+calculate_targeted_spearman <- function(data, col1_list, col2_list = NULL, method = "spearman", p_adjust_method = "BH", remove_self = TRUE) {
+  # Parameter description:
+  # data: input dataframe
+  # col1_list: vector of reference column names, e.g., c("GAD1", "PV")
+  # col2_list: vector of target column names. If NULL (default), it includes all columns in data except those in col1_list.
+  # method: correlation method, default is 'spearman'
+  # p_adjust_method: p-value adjustment method, default is "BH"
+  # remove_self: whether to remove pairs where col1 and col2 are the same (useful when there is overlap), default is TRUE
+  
+  # 1. Handle default case: if col2_list is NULL, set it to all columns except those in col1_list
+  if (is.null(col2_list)) {
+    col2_list <- setdiff(names(data), col1_list)
+  }
+ 
+  # 2. Build all required column pairs (every column in col1_list paired with every column in col2_list)
+  pairs <- expand.grid(col1 = col1_list, col2 = col2_list, stringsAsFactors = FALSE)
+ 
+  # 3. Remove self-comparisons (if requested)
+  if (remove_self) {
+    pairs <- pairs[pairs$col1 != pairs$col2, ]
+  }
+ 
+  # 4. Calculate correlations and p-values
+  results <- lapply(seq_len(nrow(pairs)), function(i) {
+    pair <- pairs[i, ]
+    # Perform correlation test
+    test_result <- cor.test(data[[pair$col1]],
+                            data[[pair$col2]],
+                            method = method)
+    # Return result row
+    data.frame(
+      col1 = pair$col1,
+      col2 = pair$col2,
+      coefficient = test_result$estimate,
+      pvalue = test_result$p.value,
+      stringsAsFactors = FALSE
+    )
+  }) %>% bind_rows()
+ 
+  # 5. Adjust p-values for multiple testing
+  if (nrow(results) > 0) {
+    results$padj <- p.adjust(results$pvalue, method = p_adjust_method)
+    # Sort by absolute correlation coefficient (optional)
+    results <- results %>% arrange(desc(abs(coefficient)))
+  } else {
+    warning("No valid column pairs were generated for comparison. Please check the col1_list and col2_list parameters.")
+  }
+ 
+  return(results)
+}
+```
+
+##### anno.L2 Level
+
+```{r}
+# env: thinkpad
+# dir:
+setwd("C:/Users/a8799/Desktop/project/2022-10-14_mouse_spatial/PLX5622")
+
+meta.sn <- read.csv("../002SC/004Seurat_out/002cell_type_anno/sobj.meta.csv", row.names=1)
+
+# Read Aβ table
+meta.immuno <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/meta.Abeta_GFAP_P2RY12.csv", row.names=1)
+head(meta.immuno[, c(colnames(meta.immuno)[1:6], "Abeta_index")])
+
+# Read deconvolution table
+LEVEL <- "anno.L2"
+meta.deconvo <- read.csv(paste0("../001ST/001Giotto_out/cell2location2/", LEVEL, ".spot.anno.prop.csv"), row.names=1)
+head(meta.deconvo[, c(1:6)])
+
+meta.merged <- merge(meta.immuno[, c("cell_ID", "Abeta_index", "treatment")],
+                     meta.deconvo, by.x="cell_ID", by.y="cell.id")
+
+meta.merged.sub <- subset(meta.merged, treatment == "FADCtrl")
+
+# Aβ-cell type spatial correlation analysis. Organize into a table: cell_type, rho, pvalue, padj
+cell_types <- unique(meta.sn[[LEVEL]])
+cell_types <- make.names(cell_types) # Endo-Others -> Endo.Others
+
+result.df <- calculate_targeted_spearman(
+  data = meta.merged.sub,
+  col1_list = "Abeta_index",
+  col2_list = cell_types
+)
+
+result.df <- arrange(result.df, coefficient)
+result.df
+```
+
+The results above are not entirely consistent with my expectations. I expected GABA_0 to have more overlap with Aβ, but it actually shows one of the lowest spatial correlations with Aβ among neuronal subtypes.
+
+Classification based on spatial correlation with Aβ.
+
+```r
+# Read proportion change table.
+# Plotting: Comparison of proportion changes (Log2FC) between Aβ-overlap and Aβ-free neurons across treatments.
+# Plotting: Comparison between GABA and Glu.
+```
+
+##### anno.L3 Level
+
+```{r}
+# Read deconvolution table.
+LEVEL <- "anno.L3"
+meta.deconvo <- read.csv(paste0("../001ST/001Giotto_out/cell2location2/", LEVEL, ".spot.anno.prop.csv"), row.names=1)
+head(meta.deconvo[, c(1:6)])
+
+meta.merged <- merge(meta.immuno[, c("cell_ID", "Abeta_index", "treatment")],
+                     meta.deconvo, by.x="cell_ID", by.y="cell.id")
+
+meta.merged.sub <- subset(meta.merged, treatment == "FADCtrl")
+
+# Aβ-cell type spatial correlation analysis.
+cell_types <- unique(meta.sn[[LEVEL]])
+cell_types <- make.names(cell_types)
+
+result.df <- calculate_targeted_spearman(
+  data = meta.merged.sub,
+  col1_list = "Abeta_index",
+  col2_list = cell_types
+)
+
+result.df <- arrange(result.df, coefficient)
+
+result.df.sub <- subset(result.df, grepl("GABA|Glu", result.df$col2))
+head(result.df.sub)
+tail(result.df.sub)
+
+result.df.sub <- subset(result.df, grepl("GABA", result.df$col2))
+head(result.df.sub)
+tail(result.df.sub)
+
+result.df.sub <- subset(result.df, grepl("Glu", result.df$col2))
+head(result.df.sub)
+tail(result.df.sub)
+```
+
+**Issue with the above analysis**: The weight of Isocortex is very high. If a neuronal subtype is mainly distributed in the hippocampus but completely absent in the cortex, it will be considered to have low correlation with Aβ, which does not reflect the true biological situation.
+
+#### Do Neuronal Subtypes Primarily Distributed in Aβ-Enriched Brain Regions Show Greater Proportion Changes?
+
+```{r}
+# For each cell subtype, aggregate by brain region to identify its primary distribution area.
+LEVEL <- "anno.L2"
+cell_types <- unique(meta.sn[[LEVEL]])
+cell_types <- make.names(cell_types)
+
+meta.deconvo <- read.csv(paste0("../001ST/001Giotto_out/cell2location2/", LEVEL, ".spot.anno.prop.csv"), row.names=1)
+meta.deconvo.long <- melt(meta.deconvo[, c("brain.region", cell_types)])
+
+meta.deconvo.agg <- meta.deconvo.long %>%
+  group_by(brain.region, variable) %>%
+  summarise(Mean=mean(value)) %>%
+  arrange(variable, desc(Mean)) %>%
+  group_by(variable) %>%
+  slice_head(n=1) %>%
+  filter(brain.region %in% c("Olfactory area", "Thalamus", "Isocortex", "Hippocampus"))
+
+in.path <- paste0("../002SC/004Seurat_out/003proportion/scProportionTest/",
+                  LEVEL, ".AD_5622_vs_AD_ctrl.csv")
+
+df.proptest <- read.csv(in.path)
+df.proptest$clusters <- make.names(df.proptest$clusters)
+
+df.proptest.sub <- subset(df.proptest, df.proptest$clusters %in% meta.deconvo.agg$variable & FDR < 0.1)
+df.proptest.sub[, c("clusters", "obs_log2FD", "FDR")]
+```
+
+The results are inconsistent with expectations. I originally expected little change in Glu and an increase in GABA proportion. Instead, Glu subtypes show inconsistent changes, while most GABA subtypes show no significant change.
+
+#### Investigation of Genes of Interest
+
+Tfap2b, Plk2, and Mical2 are recoverably upregulated in GABA_0. Is this specific to GABA_0?  
+Answer: Similar DEGs were not detected in other GABAergic neurons. However, this may be due to the lower cell numbers in other GABAergic subtypes, resulting in insufficient statistical power. The fold change of Tfap2b in overall GABA is larger than in GABA_0, suggesting that the change in Tfap2b may occur at the level of all GABAergic neurons. If Tfap2b is the driver of the increased proportion of GABA_0 and is also upregulated in other subtypes, why did the proportions of other GABA subtypes not increase?
+
+Is this change specific to a subpopulation within GABA_0?
+
+```{r}
+L3.marker.GABA_0 <- read.csv("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/GABA_0.marker.csv", row.names=1)
+subset(L3.marker.GABA_0, gene %in% c("Tfap2b", "Plk2", "Mical2")) # 0 row
+subset(L3.marker.GABA_0, gene %in% c("Nrp1", "Nrp2", "Hcrt")) # cluster 2, 4, 9
+subset(L3.marker.GABA_0, gene %in% c("Bnc2")) # cluster 10
+
+# GABA_0_10 highly expresses Bnc2 and shows clear recoverable upregulation in proportion. It is mainly distributed in the hypothalamus and cortical subplate. Total cell count: 59.
+```
+
+#### Plot Marker Genes of Bnc2+ Neurons
+
+```{r}
+library(Seurat)
+sobj.GABA_0 <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.GABA_0.rds")
+sobj.GABA_0$anno.L3 <- paste0(sobj.GABA_0$anno.L2, "_", sobj.GABA_0$nn_res.0.3)
+Idents(sobj.GABA_0) <- "anno.L3"
+p <- DotPlot(sobj.GABA_0, features=c("Bnc2", "Lepr", "Agrp", "Npy", "Pomc", "Nr5a1"))
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Bnc2_pos_GABA.png", p, width=4.39, height=4.39, dpi=300)
+```
+
+### Astro Exploration
+
+#### Subtype Annotation
+
+Display different Astro subtypes. They can at least be divided into telencephalic, non-telencephalic, and Gfap+ categories.
+
+```{r}
+library(Seurat)
+sobj.sub <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Astro.rds")
+Idents(sobj.sub) <- "nn_res.0.3"
+
+table(sobj.sub$orig.ident, sobj.sub$nn_res.0.3)
+
+# Check Astro marker genes
+markers.L2 <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L2.FindAllMarkers.csv", row.names=1)
+markers.L2 <- subset(markers.L2, cluster=="Astro")
+L2.top20 <- head(markers.L2, 20)$gene
+DotPlot(sobj.sub, L2.top20) + coord_flip() + ggtitle("L2.top20 markers")
+
+# Brain major cell type marker genes
+brain_main <- read.csv("../002SC/000data/cellstar.expr.csv")
+DotPlot(sobj.sub, brain_main$gene) + coord_flip() + ggtitle("brain main CT markers")
+
+VlnPlot(sobj.sub, features = "nFeature_RNA")
+
+# Subcluster marker genes
+markers <- read.csv("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Astro.marker.csv", row.names=1)
+subcluster.top3 <- markers %>% group_by(cluster) %>% slice_head(n=3)
+DotPlot(sobj.sub, subcluster.top3$gene) + coord_flip()
+
+# Markers by brain region
+marker1 <- c("Agt", "Mfge8", "Gfap")
+DotPlot(sobj.sub, marker1) + coord_flip()
+
+# Other markers for cortical astrocytes
+cortical_astro_markers <- c("Emx2", "Lhx2", "Mfge8", "Slc1a2")
+
+# Other markers for thalamic astrocytes
+thalamic_astro_markers <- c("Sparc", "Agt", "Ndrg2", "Erbb4")
+DotPlot(sobj.sub, c(cortical_astro_markers, thalamic_astro_markers)) + coord_flip()
+
+# Does Endo contain astro subpopulations?
+# Plot Aqp4, Apoe, and Gfap expression on the total UMAP
+```
+
+#### Inter-Group DEGs among Subtypes
+
+Expression differences between treatments for different subtypes? Focus mainly on Astro_0 and Astro_1.
+
+```{r}
+library(Seurat)
+BiocManager::install("MAST")
+
+sobj.sub <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Astro.rds")
+Idents(sobj.sub) <- "nn_res.0.3"
+sobj.sub$anno.L3 <- paste0(sobj.sub$anno.L2, "_", sobj.sub$nn_res.0.3)
+sobj.sub$treatment_ct <- paste0(sobj.sub$treatment,"_", sobj.sub$anno.L3)
+Idents(sobj.sub) <- "treatment_ct"
+
+# Only use genes with expression > x in Astro to make adjusted p-values smaller.
+summed <- readRDS("../002SC/004Seurat_out/004DEGs/DESeq/anno.L3/summed.anno.L3.rds")
+Astro_0.summed <- summed@assays@data$counts[, summed$anno.L3=="Astro_0"]
+Astro_0.summed.sub <- Astro_0.summed[rowSums(Astro_0.summed)/ncol(Astro_0.summed) > 10, ]
+sobj.sub.sub <- subset(sobj.sub, features = row.names(Astro_0.summed.sub))
+
+df1 <- FindMarkers(sobj.sub.sub, ident.1 = "AD_5622_Astro_0", ident.2="AD_ctrl_Astro_0", test.use="MAST", latent.vars = c("batch"))
+head(df1)
+
+df2 <- FindMarkers(sobj.sub.sub, ident.1 = "AD_5622_Astro_1", ident.2="AD_ctrl_Astro_1", test.use="MAST", latent.vars = c("batch"))
+head(df2)
+
+df1.AD <- FindMarkers(sobj.sub.sub, ident.1 = "AD_ctrl_Astro_0", ident.2="WT_ctrl_Astro_0", test.use="MAST", latent.vars = c("batch"))
+df2.AD <- FindMarkers(sobj.sub.sub, ident.1 = "AD_ctrl_Astro_1", ident.2="WT_ctrl_Astro_1", test.use="MAST", latent.vars = c("batch"))
+
+VlnPlot(sobj.sub, features = c("Slc1a2", "Gramd3", "Dbx2"), idents = 0, group.by = "treatment")
+VlnPlot(sobj.sub, features = c("Nrg3", "Prdm16", "Top1"), idents = 1, group.by = "treatment")
+```
+
+### Endo-Others Exploration
+
+- Are there changes in cell proportions between treatments? Increased in AD vs WT and also increased in PL vs AD. Consistent with the trend observed in astrocytes.
+- Marker visualization: FeaturePlot / VlnPlot / DoHeatmap for Slc1a2, Slc1a3, Aldh1l1, Aqp4, Gfap, C3, Serpina3n, Gad1/2, Slc6a1, Sst, Cck, Pecam1, Cldn5, Pdgfrb, Rgs5.
+- Exclude doublets: Examine expression of Astro, Endo, GABA markers, and choroid plexus epithelial cell markers across different subclusters.
+- Cell cycle and stress genes: Check enrichment of immediate early genes (Fos/Jun/Egr1), heat shock proteins (Hsp family), and stress markers to distinguish stress/apoptotic populations.
+- Calculate mitochondrial percentage and filter:
+  `PercentageFeatureSet(object, pattern = "^mt-")`
+  Use VlnPlot / FeatureScatter together with nFeature_RNA / nCount_RNA for evaluation.
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+
+sobj.sub <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Endo-Others.rds")
+Idents(sobj.sub) <- "nn_res.0.3"
+
+# Check Endo-Others marker genes
+markers.L2 <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L2.FindAllMarkers.csv", row.names=1)
+markers.L2 <- subset(markers.L2, cluster=="Endo-Others")
+L2.top20 <- head(markers.L2, 20)$gene
+DotPlot(sobj.sub, L2.top20) + coord_flip() + ggtitle("L2.top20 markers")
+
+# Check anno.L3 marker genes
+markers <- read.csv("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Endo-Others.marker.csv", row.names=1)
+subcluster.top3 <- markers %>% group_by(cluster) %>% slice_head(n=3)
+DotPlot(sobj.sub, subcluster.top3$gene) + coord_flip()
+
+# Check mitochondrial gene percentage
+genes <- c("Slc1a2", "Slc1a3", "Aldh1l1", "Aqp4", "Gfap", "C3", "Serpina3n",
+           "Gad1", "Gad2", "Slc6a1", "Sst", "Cck",
+           "Pecam1", "Cldn5", "Pdgfrb", "Rgs5")
+DotPlot(sobj.sub, genes)
+
+# Choroid plexus markers
+cpe_markers <- c("Ttr", "Aqp1", "Atp1a2", "Cst3", "Apoe", "Kcnj13", "Folr1",
+                 "Otx2", "Foxj1", "Enpp2", "Htr2c", "Igfbp2", "Kl",
+                 "Slc4a5", "Slc20a2", "Trpm3")
+DotPlot(sobj.sub, cpe_markers) + coord_flip() + ggtitle("cpe_markers")
+
+# Astrocyte markers
+astro_markers <- c("Gfap", "Aqp4", "Aldh1l1")
+
+# GABAergic neuron markers
+gaba_markers <- c("Gad1", "Gad2", "Slc32a1")
+
+# Excitatory neuron markers
+exc_markers <- c("Slc17a7", "Slc17a6", "Syt1")
+
+# Endothelial cell markers
+endo_markers <- c("Pecam1", "Cldn5", "Flt1")
+
+# Ependymal cell markers
+epen_markers <- c("Foxj1", "Ccdc153", "Rarres2")
+
+markers.4types <- c(astro_markers, gaba_markers, exc_markers, endo_markers, epen_markers)
+DotPlot(sobj.sub, markers.4types) + coord_flip()
+```
+
+### Oligo Exploration
+
+#### Markers for Different Developmental States
+
+Literature survey: Marker genes for different oligodendrocyte developmental states (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5221728/). The paper divides Oligo into OPC, COP, NF, MF, and MOL stages.
+
+Disease-associated Oligo: “Single-cell RNA-sequencing identifies disease-associated oligodendrocytes in male APP NL-G-F and 5XFAD mice”.
+
+Oligo_0 and Oligo_1 differences? According to MapQuery annotation, Oligo_0 belongs to MFOL and Oligo_1 belongs to MOL.
+
+```{r}
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+
+sobj <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Oligo.rds")
+Idents(sobj) <- "nn_res.0.3"
+sobj <- subset(sobj, idents = c(0, 1, 2))
+
+oligo.markers <- c("Sox6", "Pdgfra", "Cspg4", "Ptprz1", "Gpr17", "Neu4", "Bmp4", # COPs and NFOL
+                   "Tcf7l2", "Casr", # NF
+                   "Ctps", "Ablims", "Thbs3", "Mal", "Mog", "Plp1", "Serinc5", # MF
+                   "Il33", "Ptgds", "Opalin", # MOL 1, 2
+                   "Klk6", "S100b", "Anxa5", "Cd59a", # MOL 3, 4
+                   "Apod", "Trf", "Pmp22", # MOL
+                   "C4b", "Apoe", "Cd74", "Serpina3n") # Disease-associated Oligo
+
+p <- Seurat::DotPlot(sobj, features = oligo.markers, dot.scale = 3) + coord_flip() +
+  theme_nature() + scale_x_discrete(name = c("Oligo_0", "Oligo_1", "Oligo_2")) +
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(face="italic"),
+        legend.title=element_blank())
+
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Oligo.subtype_markers.DotPlot.pdf", p,
+       width=2.49, height=3.59, device=cairo_pdf)
+```
+
+#### Cluster Markers
+
+```{r}
+library(Seurat)
+
+# Including Oligo_2
+sobj <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Oligo.rds")
+Idents(sobj) <- "nn_res.0.3"
+sobj <- subset(sobj, idents = c(0, 1, 2))
+cluster_markers <- FindAllMarkers(sobj, only.pos=T)
+cluster_markers.top5 <- cluster_markers %>% group_by(cluster) %>% slice_head(n=5)
+p <- DotPlot(sobj, features = cluster_markers.top5$gene) + coord_flip()
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Oligo.cluster_marker_top5.DotPlot.png", p, width=6.54, height=4.78, dpi=300)
+
+# Excluding Oligo_2
+sobj <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Oligo.rds")
+Idents(sobj) <- "nn_res.0.3"
+sobj <- subset(sobj, idents = c(0, 1))
+cluster_markers <- FindAllMarkers(sobj, only.pos=T)
+write.csv(cluster_markers, "../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Oligo.markers.csv")
+
+cluster_markers.top5 <- cluster_markers %>% group_by(cluster) %>% slice_head(n=5)
+p <- DotPlot(sobj, features = cluster_markers.top5$gene, dot.scale = 3) + coord_flip() +
+  scale_y_discrete(labels = c("Oligo_0", "Oligo_1")) +
+  theme(legend.title = element_blank(),
+        axis.text.y = element_text(face="italic"),
+        axis.text.x = element_text(angle=45, vjust=0.5),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank())
+
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Oligo_0-1.cluster_marker_top5.DotPlot.png", p, width=3, height=2.54, dpi=300)
+ggsave("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/Oligo_0-1.cluster_marker_top5.DotPlot.pdf", p, width=3, height=2.54, device=cairo_pdf)
+```
+
+#### OPC + Oligo Combined Analysis
+
+```{r}
+# env: dhlab-17 docker
+library("harmony")
+
+# load data
+sobj <- readRDS("004Seurat_out/002cell_type_anno/sobj.rds")
+Idents(sobj) <- "anno.L2"
+outdir <- "002SC/004Seurat_out/002cell_type_anno/Oligo"
+if (!dir.exists(outdir)) {dir.create(outdir)}
+
+clus.resolution <- 0.3
+cluster.name <- paste0("nn_res.", clus.resolution)
+
+# subset
+ct <- "OPC_Oligo"
+ct.sub <- subset(sobj, idents=c("OPC", "Oligo"))
+
+# preprocess
+DefaultAssay(ct.sub) <- "RNA"
+ct.sub <- ScaleData(ct.sub)
+ct.sub <- FindVariableFeatures(ct.sub) %>%
+          RunPCA(npcs = 30, reduction.name="pca") %>%
+          RunHarmony(c("orig.ident")) %>%
+          RunUMAP(reduction = "harmony", dims = 1:30, reduction.name="umap") %>%
+          FindNeighbors(reduction = "harmony", dims = 1:30, graph.name="nn") %>%
+          FindClusters(resolution = 0.3, graph.name="nn")
+
+ct.name <- make.names(ct)
+p1 <- DimPlot(ct.sub, reduction = "umap", group.by=cluster.name,
+              label = TRUE, repel = TRUE, pt.size=1)
+ggsave(paste0(outdir, "/", ct.name, ".dimplot_grouped_by_cluster.png"), p1, width=10, height=9)
+
+p2 <- DimPlot(ct.sub, reduction = "umap", group.by="anno.L3",
+              label = TRUE, repel = TRUE, pt.size=1)
+ggsave(paste0(outdir, "/", ct.name, ".dimplot_grouped_by_anno.L3.png"), p2, width=10, height=9)
+
+saveRDS(ct.sub, "002SC/004Seurat_out/002cell_type_anno/Oligo/OPC_Oligo.rds")
+```
+
+#### Compare Mbp Expression Differences Across Treatments in Specific Subtypes
+
+```{r}
+library(Seurat)
+library(ggpubr)
+library(patchwork)
+
+sobj <- readRDS("../002SC/004Seurat_out/002cell_type_anno/cluster.L3/sobj.Oligo.rds")
+Idents(sobj) <- "nn_res.0.3"
+sobj <- subset(sobj, idents = c(0, 1, 2))
+sobj$treatment <- factor(sobj$treatment, levels=c("WT_ctrl", "AD_ctrl", "AD_5622"), ordered=T)
+
+sobj.0 <- subset(sobj, idents=0)
+sobj.1 <- subset(sobj, idents=1)
+
+p1 <- VlnPlot(sobj.0, features="Mbp", group.by = "treatment", combine = F)[[1]]
+p1 <- p1 + geom_boxplot(width=0.2) +
+  stat_compare_means(comparisons=list(c("WT_ctrl", "AD_ctrl"),
+                                      c("AD_ctrl", "AD_5622"),
+                                      c("WT_ctrl", "AD_5622"))) +
+  ylim(0, 7) + labs(title="Oligo_0", y="Expression Level of Mbp")
+
+p2 <- VlnPlot(sobj.1, features="Mbp", group.by = "treatment", combine = F)[[1]]
+p2 <- p2 + geom_boxplot(width=0.2) +
+  stat_compare_means(comparisons=list(c("WT_ctrl", "AD_ctrl"),
+                                      c("AD_ctrl", "AD_5622"),
+                                      c("WT_ctrl", "AD_5622"))) +
+  ylim(0, 7) + labs(title="Oligo_1", y="Expression Level of Mbp")
+
+p1 | p2
+```
+
+

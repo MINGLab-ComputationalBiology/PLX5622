@@ -1,0 +1,572 @@
+# scProportionTest
+
+## Plotting Function: permutation_plot2
+
+```{r}
+permutation_plot2 <- function(infile, title="", Legend=F, label_colors=NULL){
+  # Custom log2 fold change threshold.
+  # Reference: /storage/lch/project/2023-02-07_hippo_single_cell/script/008proportionTest.r
+  data <- read.csv(infile)
+  data <- data[order(data$obs_log2FD, decreasing = T), ]
+  data$clusters <- factor(data$clusters, levels=data$clusters, ordered=T)
+  data$point.color <- ifelse(abs(data$obs_log2FD) > log2(1.2) & data$FDR<0.05,
+                             "abs(obs_log2FD)>log2(1.2) & FDR<0.05", "NA")
+  # Highlight specific labels
+  label.color <- rep("black", length(data$clusters))
+  names(label.color) <- data$clusters
+  if (!is.null(label_colors)){
+    for (i in names(label_colors)){
+      label.color[i] <- label_colors[i]
+    }
+  }
+  p <- ggplot(data, aes(clusters, obs_log2FD)) +
+    geom_linerange(aes(ymin=boot_CI_2.5, ymax=boot_CI_97.5)) +
+    geom_hline(yintercept=-log2(1.2)) +
+    geom_hline(yintercept=log2(1.2)) +
+    geom_point(aes(color=point.color)) +
+    ggtitle(title) +
+    coord_flip() +
+    scale_color_manual(values=c("abs(obs_log2FD)>log2(1.2) & FDR<0.05"="red", "NA"="black")) +
+    theme(panel.grid = element_line(color="grey"),
+          panel.background = element_blank(),
+          panel.border = element_rect(fill=NA),
+          axis.text.y = element_text(color = label.color, size=12)
+    )
+  if (Legend==F) {
+    p <- p + theme(legend.position = "none")
+  } else {
+    p <- p + theme(legend.position = "bottom")
+  }
+  return(p)
+}
+```
+
+## Proportion Changes Relative to Total Cells
+
+When performing single-cell proportion analysis, I found that the proportion of a certain cell subpopulation showed clear differences between groups. However, because there are only 3 samples per group, ANOVA could not detect significant differences. I need to publish this in a high-impact journal and cannot perform additional experiments. How should I present this observation? Are there any more lenient statistical methods?
+
+### Permutation Test Combining All Three Treatment Groups
+
+```{r}
+# env: dhlab
+# remotes::install_github("rpolicastro/scProportionTest")
+library("scProportionTest")
+setwd("/home/mouse_ad/002SC")
+sobj <- readRDS("004Seurat_out/002cell_type_anno/sobj.rds")
+outdir <- "004Seurat_out/003proportion/scProportionTest"
+if ( ! dir.exists(outdir) ){
+  dir.create(outdir)
+}
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[3]] <- c("AD_ctrl", "WT_ctrl")
+prop_test <- sc_utils(sobj)
+for (label in c("anno.L1", "anno.L2", "anno.L3")){
+  # label <- "anno.L3"
+  p.list <- list()
+  n <- 1
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    out.file <- paste0(outdir, "/", label, ".", S1, "_vs_", S2, ".csv")
+    prop_test.result <- permutation_test(
+          prop_test,
+          cluster_identity = label,
+          sample_1 = S2, sample_2 = S1,
+          sample_identity = "treatment"
+    )
+    write.csv(prop_test.result@results$permutation,
+              out.file,
+              row.names = F)
+  }
+}
+```
+
+### Plot All Cell Types Together
+
+```{r}
+# env: thinkpad
+library(ggplot2)
+library(patchwork)
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[3]] <- c("AD_ctrl", "WT_ctrl")
+outdir <- "../002SC/004Seurat_out/003proportion/scProportionTest"
+for (label in c("anno.L1", "anno.L2")){
+  p.list <- list()
+  n <- 1
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    out.file <- paste0(outdir, "/", label, ".", S1, "_vs_", S2, ".csv")
+    p <- permutation_plot2(out.file, title=paste0(S1, "_vs_", S2))
+    p.list[[n]] <- p
+    n <- n + 1
+  }
+ 
+  p <- wrap_plots(p.list, ncol=3)
+  if (label == "anno.L1"){
+    ggsave(paste0("../002SC/004Seurat_out/003proportion/scProportionTest/permutation_plot2.", label, ".png"),
+         p, width=8, height=5)
+  } else {
+    ggsave(paste0("../002SC/004Seurat_out/003proportion/scProportionTest/permutation_plot2.", label, ".png"),
+         p, width=9, height=7)
+  }
+}
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/003proportion/scProportionTest/permutation_plot2.anno.L1.png")
+knitr::include_graphics("../002SC/004Seurat_out/003proportion/scProportionTest/permutation_plot2.anno.L2.png")
+```
+
+### Plot All Glu Subtypes
+
+```{r}
+# env: thinkpad
+library(ggplot2)
+library(patchwork)
+
+permutation_plot2 <- function(infile, title="", Legend=F, label_colors=NULL){
+  # Custom log2 fold change threshold.
+  # Reference: /storage/lch/project/2023-02-07_hippo_single_cell/script/008proportionTest.r
+  data <- read.csv(infile)
+  data <- subset(data, grepl("Glu_", clusters))
+  data <- data[order(data$obs_log2FD, decreasing = T), ]
+  data$clusters <- factor(data$clusters, levels=data$clusters, ordered=T)
+  data$point.color <- ifelse(abs(data$obs_log2FD) > log2(1.2) & data$FDR<0.05,
+                             "abs(obs_log2FD)>log2(1.2) & FDR<0.05", "NA")
+  # Highlight specific labels
+  label.color <- rep("black", length(data$clusters))
+  names(label.color) <- data$clusters
+  if (!is.null(label_colors)){
+    for (i in names(label_colors)){
+      label.color[i] <- label_colors[i]
+    }
+  }
+  p <- ggplot(data, aes(clusters, obs_log2FD)) +
+    geom_linerange(aes(ymin=boot_CI_2.5, ymax=boot_CI_97.5)) +
+    geom_hline(yintercept=-log2(1.2), linetype="dashed", color="grey") +
+    geom_hline(yintercept=log2(1.2), linetype="dashed", color="grey") +
+    geom_point(aes(color=point.color)) +
+    ggtitle(title) +
+    coord_flip() +
+    scale_color_manual(values=c("abs(obs_log2FD)>log2(1.2) & FDR<0.05"="red", "NA"="black")) +
+    theme_classic() +
+    theme(
+          axis.text.y = element_text(color = label.color, size=9),
+          axis.text.x = element_text(color = label.color, size=7),
+          axis.title.x = element_blank(),
+          plot.title = element_text(size=8),
+          axis.title.y = element_blank()
+    )
+  if (Legend==F) {
+    p <- p + theme(legend.position = "none")
+  } else {
+    p <- p + theme(legend.position = "bottom")
+  }
+  return(p)
+}
+
+pairs <- list()
+pairs[[1]] <- c("AD_ctrl", "WT_ctrl")
+pairs[[2]] <- c("AD_5622", "AD_ctrl")
+pairs[[3]] <- c("AD_5622", "WT_ctrl")
+mapping <- c(WT_ctrl="WT-CTRL", AD_ctrl="5xFAD-CTRL", AD_5622="5xFAD-PLX")
+outdir <- "../002SC/004Seurat_out/003proportion/scProportionTest"
+label = "anno.L2"
+p.list <- list()
+n <- 1
+for (pair in pairs) {
+  S1 <- pair[1]
+  S2 <- pair[2]
+  out.file <- paste0(outdir, "/", label, ".", S1, "_vs_", S2, ".csv")
+  p <- permutation_plot2(out.file, title=paste0(mapping[S1], "_vs_", mapping[S2]))
+  p.list[[n]] <- p
+  n <- n + 1
+}
+p <- wrap_plots(p.list, ncol=3)
+ggsave(paste0("../002SC/004Seurat_out/003proportion/scProportionTest/permutation_plot2.", label, ".glu.pdf"),
+     p, width=5.2769, height=3.3)
+```
+
+### Plot Only Specified Cell Types
+
+Using the combined results.
+
+It is uncertain whether to use GABA or GABA_0, so both will be generated.
+
+Select the GABA_0 results from the three comparison pairs and plot them on the same coordinate system.  
+x = comparison, y = obs_log2FD
+
+#### Style 1
+
+```{r}
+# env: thinkpad
+# dependence: figure_process.Rmd # Load plotting functions
+outdir <- "../002SC/004Seurat_out/003proportion/scProportionTest"
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[3]] <- c("AD_ctrl", "WT_ctrl")
+for (CT in c("GABA", "GABA_0", "GABA_1", "GABA_2", "GABA_3", "Micro", "Oligo", "OPC")) {
+  if (CT %in% c("GABA_0", "GABA_1", "GABA_2", "GABA_3")) {
+    label <- "anno.L2"
+  } else {
+    label <- "anno.L1"
+  }
+  data <- data.frame()
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    infile <- paste0(outdir, "/", label, ".",
+                     S1, "_vs_", S2, ".csv")
+    df <- read.csv(infile)
+    df <- subset(df, clusters == CT, select=c("obs_log2FD", "FDR", "boot_mean_log2FD", "boot_CI_2.5", "boot_CI_97.5"))
+    df$comparison <- paste0(S1, "_vs_", S2)
+    data <- rbind(data, df)
+  }
+ 
+  data$comparison <- factor(data$comparison, levels=c("AD_5622_vs_AD_ctrl",
+                                                      "AD_ctrl_vs_WT_ctrl",
+                                                      "AD_5622_vs_WT_ctrl"),
+                            ordered=T)
+ 
+  data$point.color <- ifelse(abs(data$obs_log2FD) > log2(1.2) & data$FDR<0.05,
+                             "|FC| > 1.2 & FDR < 0.05", "NS")
+ 
+  p <- ggplot(data, aes(comparison, obs_log2FD)) +
+    geom_linerange(aes(ymin=boot_CI_2.5, ymax=boot_CI_97.5)) +
+    geom_hline(yintercept=-log2(1.2), color="grey", linetype="dashed") +
+    geom_hline(yintercept=log2(1.2), color="grey", linetype="dashed") +
+    geom_point(aes(color=point.color)) +
+    labs(title=paste0(CT, " Proportion Change"), y="Observed Log<sub>2</sub>(Fold Change)") +
+    coord_flip() +
+    scale_color_manual(values=c("|FC| > 1.2 & FDR < 0.05"="red", "NS"="black")) +
+    theme_nature() +
+    theme(axis.title.x=element_markdown(),
+          legend.position = "bottom",
+          legend.title=element_blank(),
+          legend.direction = "vertical",
+          axis.title.y=element_blank())
+ 
+  ggsave(paste0(outdir, "/", CT, "_proportion_change.png"), p, width=4.30, height=2.64)
+}
+```
+
+#### Style 2: Space-Saving Version (Micro)
+
+```{r}
+# style 2
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[3]] <- c("AD_ctrl", "WT_ctrl")
+CT <- "Micro"
+label <- "anno.L1"
+data <- data.frame()
+for (pair in pairs) {
+  S1 <- pair[1]
+  S2 <- pair[2]
+  infile <- paste0(outdir, "/", label, ".",
+                   S1, "_vs_", S2, ".csv")
+  df <- read.csv(infile)
+  df <- subset(df, clusters == CT, select=c("obs_log2FD", "FDR", "boot_mean_log2FD", "boot_CI_2.5", "boot_CI_97.5"))
+  df$comparison <- paste0(S1, "_vs_", S2)
+  data <- rbind(data, df)
+}
+comparison.rename <- c("AD_5622_vs_AD_ctrl"="PL_vs_AD",
+                       "AD_ctrl_vs_WT_ctrl"="AD_vs_WT",
+                       "AD_5622_vs_WT_ctrl"="PL_vs_WT")
+data$comparison <- comparison.rename[data$comparison]
+data$comparison <- factor(data$comparison, levels=c("AD_vs_WT",
+                                                    "PL_vs_AD",
+                                                    "PL_vs_WT"),
+                          ordered=T)
+data$point.color <- ifelse(abs(data$obs_log2FD) > log2(1.2) & data$FDR<0.05,
+                           "|FC| > 1.2 & FDR < 0.05", "NS")
+p <- ggplot(data, aes(comparison, obs_log2FD)) +
+  geom_linerange(aes(ymin=boot_CI_2.5, ymax=boot_CI_97.5)) +
+  geom_hline(yintercept=-log2(1.2), color="grey", linetype="dashed") +
+  geom_hline(yintercept=log2(1.2), color="grey", linetype="dashed") +
+  geom_point(aes(color=point.color)) +
+  labs(title="", y="Proportion Change<br>(Log<sub>2</sub> Fold Change)") +
+  scale_color_manual(values=c("|FC| > 1.2 & FDR < 0.05"="red", "NS"="black")) +
+  theme_nature() +
+  theme(axis.title.x=element_blank(),
+        axis.text.x = element_text(angle=30, vjust = 0.7, hjust=.7),
+        legend.position = "none",
+        axis.title.y=element_markdown())
+ggsave(paste0(outdir, "/", CT, "_proportion_change.pdf"), p, width=1.4861, height=1.8333, device = cairo_pdf)
+ggsave(paste0(outdir, "/", CT, "_proportion_change.png"), p, width=1.4861, height=1.8333, dpi=300)
+ggsave(paste0(outdir, "/", CT, "_proportion_change.png"), p, width=4.30, height=2.64)
+```
+
+```{r}
+knitr::include_graphics("../002SC/004Seurat_out/003proportion/scProportionTest/GABA_0_proportion_change.png")
+knitr::include_graphics("../002SC/004Seurat_out/003proportion/scProportionTest/Micro_proportion_change.png")
+```
+
+#### Style 2: Space-Saving Version (Oligo)
+
+```{r oligo-proportion-change-pdf}
+# style 2
+outdir <- "../002SC/004Seurat_out/003proportion/scProportionTest"
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+# pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[2]] <- c("AD_ctrl", "WT_ctrl")
+# CT <- "Oligo"
+for (CT in c("Oligo", "OPC")) {
+  label <- "anno.L1"
+  data <- data.frame()
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    infile <- paste0(outdir, "/", label, ".",
+                     S1, "_vs_", S2, ".csv")
+    df <- read.csv(infile)
+    df <- subset(df, clusters == CT, select=c("obs_log2FD", "FDR", "boot_mean_log2FD", "boot_CI_2.5", "boot_CI_97.5"))
+    df$comparison <- paste0(S1, "_vs_", S2)
+    data <- rbind(data, df)
+  }
+ 
+  comparison.rename <- c("AD_5622_vs_AD_ctrl"="PL_vs_AD",
+                         "AD_ctrl_vs_WT_ctrl"="AD_vs_WT")
+                         # "AD_5622_vs_WT_ctrl"="PL_vs_WT")
+ 
+  data$comparison <- comparison.rename[data$comparison]
+ 
+  data$comparison <- factor(data$comparison, levels=c("AD_vs_WT",
+                                                      "PL_vs_AD"),
+                                                      # "PL_vs_WT"),
+                            ordered=T)
+ 
+  data$point.color <- ifelse(abs(data$obs_log2FD) > log2(1.2) & data$FDR<0.05,
+                             "|FC| > 1.2 & FDR < 0.05", "NS")
+ 
+  p <- ggplot(data, aes(comparison, obs_log2FD)) +
+    geom_linerange(aes(ymin=boot_CI_2.5, ymax=boot_CI_97.5)) +
+    geom_hline(yintercept=-log2(1.2), color="grey", linetype="dashed") +
+    geom_hline(yintercept=log2(1.2), color="grey", linetype="dashed") +
+    geom_point(aes(color=point.color)) +
+    labs(title="", y="Proportion Change<br>(Log<sub>2</sub> Fold Change)") +
+    scale_color_manual(values=c("|FC| > 1.2 & FDR < 0.05"="red", "NS"="black")) +
+    theme_nature() +
+    theme(axis.title.x=element_blank(),
+          axis.text.x = element_text(angle=30, vjust = 0.7, hjust=.7),
+          legend.position = "none",
+          axis.title.y=element_markdown())
+ 
+  ggsave(paste0(outdir, "/", CT, "_proportion_change.pdf"), p, width=1.4861, height=1.8333, device = cairo_pdf)
+  ggsave(paste0(outdir, "/", CT, "_proportion_change.png"), p, width=1.4861, height=1.8333, dpi=300)
+}
+```
+
+#### Oligo Subtypes (Relative to Total Cells)
+
+```{r}
+outdir <- "../002SC/004Seurat_out/003proportion/scProportionTest"
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[3]] <- c("AD_ctrl", "WT_ctrl")
+for (CT in c("Oligo_0", "Oligo_1", "Oligo_2")) {
+  label <- "anno.L3"
+  data <- data.frame()
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    infile <- paste0(outdir, "/", label, ".",
+                     S1, "_vs_", S2, ".csv")
+    df <- read.csv(infile)
+    df <- subset(df, clusters == CT, select=c("obs_log2FD", "FDR", "boot_mean_log2FD", "boot_CI_2.5", "boot_CI_97.5"))
+    df$comparison <- paste0(S1, "_vs_", S2)
+    data <- rbind(data, df)
+  }
+ 
+  data$comparison <- factor(data$comparison, levels=c("AD_5622_vs_AD_ctrl",
+                                                      "AD_ctrl_vs_WT_ctrl",
+                                                      "AD_5622_vs_WT_ctrl"),
+                            ordered=T)
+ 
+  data$point.color <- ifelse(abs(data$obs_log2FD) > log2(1.2) & data$FDR<0.05,
+                             "|FC| > 1.2 & FDR < 0.05", "NS")
+ 
+  p <- ggplot(data, aes(comparison, obs_log2FD)) +
+    geom_linerange(aes(ymin=boot_CI_2.5, ymax=boot_CI_97.5)) +
+    geom_hline(yintercept=-log2(1.2), color="grey", linetype="dashed") +
+    geom_hline(yintercept=log2(1.2), color="grey", linetype="dashed") +
+    geom_point(aes(color=point.color)) +
+    labs(title=paste0(CT, " Proportion Change"), y="Observed Log<sub>2</sub>(Fold Change)") +
+    coord_flip() +
+    scale_color_manual(values=c("|FC| > 1.2 & FDR < 0.05"="red", "NS"="black")) +
+    theme_nature() +
+    theme(axis.title.x=element_markdown(),
+          legend.position = "bottom",
+          legend.title=element_blank(),
+          legend.direction = "vertical",
+          axis.title.y=element_blank())
+ 
+  ggsave(paste0(outdir, "/", CT, "_proportion_change.png"), p, width=4.30, height=2.64)
+}
+```
+
+## Proportion Changes Relative to anno.L2 Level
+
+### Permutation Test
+
+Proportion changes of DAM and HOM within Micro.
+
+```{r}
+library("scProportionTest")
+outdir <- "002SC/004Seurat_out/003proportion/scProportionTest_subtype"
+if ( ! dir.exists(outdir) ){
+  dir.create(outdir)
+}
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[3]] <- c("AD_ctrl", "WT_ctrl")
+Idents(sobj) <- "anno.L2"
+for (CT in c("Micro", "GABA_0", "Oligo")) {
+  if (CT %in% c("Micro", "GABA_0")) next
+  # CT <- "GABA_0"
+  sobj.sub <- subset(sobj, idents=CT)
+  prop_test <- sc_utils(sobj.sub)
+ 
+  p.list <- list()
+  n <- 1
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    out.file <- paste0(outdir, "/", CT, ".", S1, "_vs_", S2, ".csv")
+    prop_test.result <- permutation_test(
+          prop_test,
+          cluster_identity = "anno.L3",
+          sample_1 = S2, sample_2 = S1,
+          sample_identity = "treatment"
+    )
+    write.csv(prop_test.result@results$permutation,
+              out.file,
+              row.names = F)
+  }
+}
+```
+
+### Plotting
+
+```{r}
+# env: thinkpad
+library(ggplot2)
+library(patchwork)
+pairs <- list()
+pairs[[1]] <- c("AD_5622", "AD_ctrl")
+pairs[[2]] <- c("AD_5622", "WT_ctrl")
+pairs[[3]] <- c("AD_ctrl", "WT_ctrl")
+outdir <- "../002SC/004Seurat_out/003proportion/scProportionTest_subtype"
+for (CT in c("Micro", "GABA_0")) {
+ 
+  # CT <- "GABA_0"
+ 
+  p.list <- list()
+  n <- 1
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    out.file <- paste0(outdir, "/", CT, ".", S1, "_vs_", S2, ".csv")
+    p <- permutation_plot2(out.file, title=paste0(S1, "_vs_", S2))
+    p.list[[n]] <- p
+    n <- n + 1
+  }
+ 
+  p <- wrap_plots(p.list, ncol=3)
+  ggsave(paste0(outdir, "/", CT, ".permutation_plot2.png"),
+         p, width=8, height=4)
+}
+```
+
+### Oligo Subtypes
+
+```{r oligo-subtype-proportion-total-pdf}
+# The permutationPlot.target_ct function is located in: C:/Users/a8799/Desktop/project/2022-10-14_mouse_spatial/manuscript/figure_process.Rmd
+
+library(ggplot2)
+
+permutationPlot.target_ct2 <- function(CT, Title, in.prefix) {
+  pairs <- list()
+  pairs[[1]] <- c("AD_5622", "AD_ctrl")
+  pairs[[2]] <- c("AD_ctrl", "WT_ctrl")
+ 
+  data <- data.frame()
+  # Retrieve statistical results for the specific cell type across the three comparison pairs.
+  for (pair in pairs) {
+    S1 <- pair[1]
+    S2 <- pair[2]
+    infile <- paste0(in.prefix, ".", S1, "_vs_", S2, ".csv")
+    df <- read.csv(infile)
+    df <- subset(df, clusters == CT, select=c("obs_log2FD", "FDR", "boot_mean_log2FD", "boot_CI_2.5", "boot_CI_97.5"))
+    df$comparison <- paste0(S1, "_vs_", S2)
+    data <- rbind(data, df)
+  }
+ 
+  comparison.rename <- c("AD_5622_vs_AD_ctrl"="PL_vs_AD",
+                         "AD_ctrl_vs_WT_ctrl"="AD_vs_WT")
+ 
+  data$comparison <- comparison.rename[data$comparison]
+ 
+  data$comparison <- factor(data$comparison, levels=c("AD_vs_WT",
+                                                      "PL_vs_AD"),
+                            ordered=T)
+ 
+  data$point.color <- ifelse(abs(data$obs_log2FD) > log2(1.2) & data$FDR<0.05,
+                             "|FC| > 1.2 & FDR < 0.05", "NS")
+ 
+  p <- ggplot(data, aes(comparison, obs_log2FD)) +
+    geom_linerange(aes(ymin=boot_CI_2.5, ymax=boot_CI_97.5)) +
+    geom_hline(yintercept=-log2(1.2), color="grey", linetype="dashed") +
+    geom_hline(yintercept=log2(1.2), color="grey", linetype="dashed") +
+    geom_point(aes(color=point.color)) +
+    scale_color_manual(values=c("|FC| > 1.2 & FDR < 0.05"="red", "NS"="black")) +
+    theme_nature() +
+    theme(axis.title.x=element_blank(),
+          axis.text.x = element_text(angle=30, vjust = 0.7, hjust=.7),
+          legend.position = "none",
+          axis.title.y=element_markdown())
+}
+
+CT <- "Oligo_0"
+in.prefix <- "../002SC/004Seurat_out/003proportion/scProportionTest_subtype/Oligo"
+p1 <- permutationPlot.target_ct2(CT, CT, in.prefix) +
+  labs(y="Proportion change<br> in Oligo<br>(Log2 Fold Change)", title=CT)
+
+CT <- "Oligo_1"
+in.prefix <- "../002SC/004Seurat_out/003proportion/scProportionTest_subtype/Oligo"
+p2 <- permutationPlot.target_ct2(CT, CT, in.prefix) +
+  labs(title=CT) + theme(axis.title.y=element_blank())
+
+pall <- p1 | p2
+ggsave("../002SC/004Seurat_out/003proportion/scProportionTest_subtype/Oligo_subtype_proportion.pdf",
+       pall, width=4, height=2.2, device = cairo_pdf)
+ggsave("../002SC/004Seurat_out/003proportion/scProportionTest_subtype/Oligo_subtype_proportion.png",
+       pall, width=4, height=2.2, dpi=300)
+
+# Relative to total cells
+CT <- "Oligo_0"
+in.prefix <- "../002SC/004Seurat_out/003proportion/scProportionTest/anno.L3"
+p1 <- permutationPlot.target_ct2(CT, Title, in.prefix) +
+  labs(y="Proportion change <br> in total cells <br> (Log2 Fold Change)", title=CT)
+
+CT <- "Oligo_1"
+in.prefix <- "../002SC/004Seurat_out/003proportion/scProportionTest/anno.L3"
+p2 <- permutationPlot.target_ct2(CT, Title, in.prefix) +
+  labs(title=CT) + theme(axis.title.y=element_blank())
+
+pall <- p1 | p2
+ggsave("../002SC/004Seurat_out/003proportion/scProportionTest_subtype/Oligo_subtype_proportion_total.pdf",
+       pall, width=4, height=2.2, device = cairo_pdf)
+ggsave("../002SC/004Seurat_out/003proportion/scProportionTest_subtype/Oligo_subtype_proportion_total.png",
+       pall, width=4, height=2.2, dpi=300)
+```

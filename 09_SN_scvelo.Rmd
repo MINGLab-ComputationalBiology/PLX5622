@@ -1,0 +1,312 @@
+
+# prepare environment
+
+scvelo is installed in conda environment named scvelo. 
+
+Although velocyto was successfully installed in the `scvelo` environment, it kept reporting missing dependencies when used. It was better to just install it using the system's Python installation.
+
+```{bash}
+
+conda deactivate
+
+sudo apt install python3.10-venv
+
+python3 -m venv velocyto
+
+source velocyto/bin/activate
+
+pip install numpy scipy cython numba matplotlib scikit-learn h5py click
+
+pip install pysam
+
+git clone https://github.com/velocyto-team/velocyto.py.git
+
+cd velocyto.py
+
+pip install --no-build-isolation .
+
+velocyto --help
+
+<!-- Usage: velocyto [OPTIONS] COMMAND [ARGS]... -->
+
+<!-- Options: -->
+<!--   --version  Show the version and exit. -->
+<!--   --help     Show this message and exit. -->
+
+<!-- Commands: -->
+<!--   run            Runs the velocity analysis outputting a loom file -->
+<!--   run10x         Runs the velocity analysis for a Chromium Sample -->
+<!--   run-dropest    Runs the velocity analysis on DropEst preprocessed data -->
+<!--   run-smartseq2  Runs the velocity analysis on SmartSeq2 data (independent bam file per cell) -->
+<!--   tools          helper tools for velocyto -->
+
+# When actually running Velocyto, it will report an error saying that samtools is missing, so it's best to install it.
+sudo apt install samtools
+
+```
+
+# run velocyto
+
+```{bash}
+
+# batch 1
+for i in AD_ctrl WT_ctrl; do 
+  mkdir -p cellranger.out/${i}.1/outs
+  ln -s /storage/data/小胶质细胞与阿尔茨海默病/博奥经典单细胞数据-原始数据备份/KYSY-7672-221034-01/bam/${i}/* ./cellranger.out/${i}.1/outs
+done
+
+# batch 2
+for i in AD_5622 AD_ctrl WT_ctrl; do 
+  mkdir -p cellranger.out/${i}.2/outs
+  ln -s /storage/data/小胶质细胞与阿尔茨海默病/博奥经典单细胞数据-原始数据备份/KYSY-8399-221034-02/bam/${i}/* ./cellranger.out/${i}.2/outs
+done
+
+# batch 3没有给bam file，先不管了。
+
+# batch 4
+# 数据在E:\project_backup\2022-10-14_mouse_spatial_v0.1\002SC\000data\batch4，得先拷贝到optiplex
+
+for i in AD_5622 AD_ctrl WT_ctrl; do 
+  mkdir -p cellranger.out/${i}.4/outs
+  ln -s /storage/data/小胶质细胞与阿尔茨海默病/batch4/bam/${i}/* ./cellranger.out/${i}.4/outs
+done
+
+
+# 把filtered_feature_bc_matrix复制到./cellranger.out/AD_5622/outs下。
+
+conda deactivate
+
+source velocyto/bin/activate
+
+# 已完成：AD_5622.1, AD_ctrl.1 WT_ctrl.1 AD_5622.2 AD_ctrl.2 WT_ctrl.2
+
+for i in AD_5622.4 AD_ctrl.4 WT_ctrl.4; do 
+  cp -r ./cellranger.out/${i} /scratch/project/
+  velocyto run10x \
+    /scratch/project/${i} \
+    refdata-gex-mm10-2020-A/genes/genes.gtf
+  rm /scratch/project/${i}/outs/cellsorted_possorted_genome_bam.bam
+done
+
+for i in AD_ctrl.1 WT_ctrl.1 AD_5622.2 AD_ctrl.2 WT_ctrl.2 AD_5622.4 AD_ctrl.4 WT_ctrl.4; do 
+  cp -r /scratch/project/${i}/velocyto/ ./cellranger.out/${i}/
+done
+```
+
+# install scvelo
+
+```{bash}
+
+source velocyto/bin/activate
+
+pip install -U scvelo
+
+pip install igraph # This will be used in the clustering later.
+pip install louvain
+```
+
+# Executing scVelo: Using the existing umap
+
+I plotted Oligo's UMAP in R, and now I want to plot the RNA velocity results on the same UMAP using scVelo software. I have already obtained the unspliced ​​expression matrix using velocityto. What should I do next?
+
+This is a very classic requirement: **"R coordinates + Seurat clustering + Python (scVelo) rate analysis"**.
+
+Since `scVelo` is based on Python, and your analysis is performed in R (Seurat), the core challenge lies in **how to seamlessly transfer the UMAP coordinates and cell annotations from R to Python**.
+
+The current best practice workflow is: **R (export .h5ad) -> Python (load and merge .loom) -> scVelo analysis**.
+
+Here are the detailed steps:
+
+### Step 1: Prepare and export data in R
+
+You need to convert the prepared Oligo Seurat object (containing UMAP coordinates and meta.data) to Python's `AnnData` format. The most commonly used package is `SeuratDisk`.
+
+**R 代码：**
+
+```{r}
+library(Seurat)
+library(SeuratDisk)
+
+# env: dhlab-17 docker
+
+sobj <- readRDS("002SC/004Seurat_out/002cell_type_anno/sobj.rds")
+sobj.sub <- subset(sobj, anno.L3 %in% c("Oligo_0", "Oligo_1"))
+
+# Assume your object is called oligo_seurat
+
+# 1. Ensure your Default Assay is RNA and contains counts
+DefaultAssay(sobj.sub) <- "RNA"
+
+sobj.sub <- ScaleData(sobj.sub, features=rownames(sobj.sub))
+
+# 2. This step is crucial: For scVelo to recognize UMAP, you need to ensure the reduction name is correct.
+
+# Seurat is usually called 'umap', which will become 'X_umap' in Python after conversion, and this is fine.
+
+# 3. Convert the Seurat object to an h5Seurat file
+
+SaveH5Seurat(sobj.sub, filename = "002SC/004Seurat_out/002cell_type_anno/oligo_seurat.h5Seurat",
+overwrite = T)
+
+# 4. Convert h5Seurat to h5ad (Python AnnData format)
+Convert("002SC/004Seurat_out/002cell_type_anno/oligo_seurat.h5Seurat", dest = "h5ad", overwrite=T)
+```
+
+---
+
+### Step 2: Load and integrate the data in Python
+
+
+```{python}
+# env: python venv
+# dir: optiplex, /storage/project/2022-10-14_mouse_spatial/scvelo
+
+source velocyto/bin/activate
+
+# scp lch@10.119.31.95:/storage/lch/project/2022-10-14_mouse_spatial/002SC/004Seurat_out/002cell_type_anno/oligo_seurat.h5ad ./
+
+import scvelo as scv
+import scanpy as sc
+import anndata
+
+adata1 = sc.read_h5ad("oligo_seurat.h5ad")
+
+ldata_list = []
+for sample in "AD_5622.1 AD_ctrl.1 WT_ctrl.1 AD_5622.2 AD_ctrl.2 WT_ctrl.2 AD_5622.4 AD_ctrl.4 WT_ctrl.4".split(): 
+    ldata = sc.read("cellranger.out/" + sample + "/velocyto/" + sample + ".loom", cache=False)
+
+    ldata.obs_names = [sample + "_" + x.split(':')[1].replace('x', '-1') for x in ldata.obs_names]
+    
+    cell_id_list = [i for i in adata1.obs_names if i.startswith(sample)]
+    subset_adata = ldata[ldata.obs_names.isin(cell_id_list), :].copy()
+    ldata_list.append(subset_adata)
+
+for i, adata in enumerate(ldata_list):
+    if not adata.var_names.is_unique:
+        duplicates = adata.var_names[adata.var_names.duplicated()].unique()
+        print(f"Index {i} contains duplicate gene names, for example: {duplicates[:5]}")
+
+def remove_duplicate_vars(adata):
+    return adata[:, ~adata.var_names.duplicated()].copy()
+
+ldata_list_clean = [remove_duplicate_vars(a) for a in ldata_list]
+
+merged_ldata = anndata.concat(ldata_list_clean, join="inner")
+
+adata2 = scv.utils.merge(adata1, merged_ldata)
+
+print(adata)
+
+```
+
+---
+
+Step 3: Run RNA Velocity
+
+```{python}
+import numpy as np
+import random
+import os
+
+seed = 42          
+np.random.seed(seed)
+random.seed(seed)
+os.environ["PYTHONHASHSEED"] = str(seed)   
+
+scv.pp.filter_and_normalize(adata2, min_shared_counts=20, n_top_genes=2000)
+scv.pp.moments(adata2, n_pcs=30, n_neighbors=30)
+
+scv.tl.recover_dynamics(adata2)
+scv.tl.velocity(adata2, mode='dynamical')
+
+scv.tl.velocity_graph(adata2)
+
+scv.pl.velocity_embedding_stream(
+    adata2, 
+    basis='umap', 
+    color=['anno.L3'], 
+    title='Oligo RNA Velocity',  save="umap3.png", dpi=300
+)
+```
+
+# scvelo: OPC+Oligo
+
+## Step 1: Prepare and export data in R
+
+```{r}
+
+library(Seurat)
+library(SeuratDisk)
+
+sobj.sub <- readRDS("002SC/004Seurat_out/002cell_type_anno/Oligo/OPC_Oligo.rds")
+
+DefaultAssay(sobj.sub) <- "RNA"
+
+sobj.sub <- ScaleData(sobj.sub, features=rownames(sobj.sub))
+
+SaveH5Seurat(sobj.sub, filename = "002SC/004Seurat_out/002cell_type_anno/Oligo/oligo_OPC.h5Seurat", 
+             overwrite = T)
+
+Convert("002SC/004Seurat_out/002cell_type_anno/Oligo/oligo_OPC.h5Seurat", dest = "h5ad", overwrite=T)
+```
+
+## Step 2: Loading and integrating data in Python
+
+```{python}
+# env:
+source velocyto/bin/activate
+
+# scp lch@10.119.31.95:/storage/lch/project/2022-10-14_mouse_spatial/002SC/004Seurat_out/002cell_type_anno/Oligo/oligo_OPC.h5ad ./
+
+import scvelo as scv
+import scanpy as sc
+import anndata
+
+adata = sc.read_h5ad("oligo_OPC.h5ad")
+
+ldata_list = []
+for sample in "AD_5622.1 AD_ctrl.1 WT_ctrl.1 AD_5622.2 AD_ctrl.2 WT_ctrl.2 AD_5622.4 AD_ctrl.4 WT_ctrl.4".split(): 
+    ldata = sc.read("cellranger.out/" + sample + "/velocyto/" + sample + ".loom", cache=True)
+    
+    ldata.obs_names = [sample + "_" + x.split(':')[1].replace('x', '-1') for x in ldata.obs_names]
+    
+    cell_id_list = [i for i in adata.obs_names if i.startswith(sample)]
+    subset_adata = ldata[ldata.obs_names.isin(cell_id_list), :].copy()
+    ldata_list.append(subset_adata)
+
+for i, adata in enumerate(ldata_list):
+    if not adata.var_names.is_unique:
+        duplicates = adata.var_names[adata.var_names.duplicated()].unique()
+        print(f"Index {i} contains duplicate gene names, for example: {duplicates[:5]}")
+
+def remove_duplicate_vars(adata):
+
+    return adata[:, ~adata.var_names.duplicated()].copy()
+
+ldata_list_clean = [remove_duplicate_vars(a) for a in ldata_list]
+
+merged_ldata = anndata.concat(ldata_list_clean, join="inner")
+
+adata2 = scv.utils.merge(adata, merged_ldata) # 
+
+print(adata2)
+```
+
+### Step 3: Run RNA Velocity
+
+```{python}
+scv.pp.filter_and_normalize(adata2, min_shared_counts=20, n_top_genes=2000)
+scv.pp.moments(adata2, n_pcs=30, n_neighbors=30)
+
+scv.tl.recover_dynamics(adata2)
+scv.tl.velocity(adata2, mode='dynamical')
+
+scv.tl.velocity_graph(adata2)
+
+scv.pl.velocity_embedding_stream(
+    adata2, 
+    basis='umap', 
+    color=['anno.L3'], 
+    title='Oligo OPC RNA Velocity',  save="umap4.png"
+)
+```
