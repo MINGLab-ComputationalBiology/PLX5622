@@ -455,7 +455,7 @@ geom.color <- group.stroke["5xFAD-PLX"]
 
 p <- ggplot(data, aes(X, Y)) + 
   geom_smooth(method="lm", linewidth=geom_linewidth, color=geom.color) + 
-  geom_point(shape=21, size = 2, fill=NA, stroke = geom_linewidth, color=geom.color) + # 可选：在均值位置添加点
+  geom_point(shape=21, size = 2, fill=NA, stroke = geom_linewidth, color=geom.color) + 
   stat_cor(method = "pearson", label.x.npc = "left", label.y.npc = "top", size=signif_textsize) + 
   scale_y_continuous(labels = scales::label_comma()) +
   labs(x="IBA1<sup>+</sup> cell area (μm<sup>2</sup>)", 
@@ -496,8 +496,6 @@ p <- ggplot(df_summary, aes(x = time, y = Mean, color = treatment, group = treat
   geom_point(shape=21, size = 2, fill=NA, stroke = geom_linewidth) + # Optional: Add points at mean positions
   geom_errorbar(aes(ymin = Mean - SE, 
                     ymax = Mean + SE), # Set error bar range (mean ± 1SE)
-                width = 0.2, 
-                linewidth = geom_linewidth) + # Set error bar range (mean ± 1SE)
                 width = 0.2, 
                 linewidth = geom_linewidth) + # width controls error bar width
   labs(y = "Lantency to platform (s)") +
@@ -749,28 +747,27 @@ data.long$treatment <- factor(data.long$treatment,
                          levels=names(group.fill), 
                          ordered=T)
 
-# 计算每个时间点、每个组的均值、标准差、标准误和置信区间
 df_summary <- data.long %>%
   group_by(time, treatment) %>%
   summarise(
-    Mean = mean(value, na.rm = TRUE), # 均值
-    SD = sd(value, na.rm = TRUE), # 标准差
-    N = n(), # 每个组的观测数
-    SE = SD / sqrt(N), # 标准误
-    CI_lower = Mean - 1.96 * SE, # 95%置信区间下限 (简单近似)
-    CI_upper = Mean + 1.96 * SE, # 95%置信区间上限
-    .groups = 'drop' # 完成分组计算
+    Mean = mean(value, na.rm = TRUE), 
+    SD = sd(value, na.rm = TRUE), 
+    N = n(), # 
+    SE = SD / sqrt(N), 
+    CI_lower = Mean - 1.96 * SE, 
+    CI_upper = Mean + 1.96 * SE, 
+    .groups = 'drop' 
   )
 
 # df_summary
 
 p <- ggplot(df_summary, aes(x = time, y = Mean, color = treatment, group = treatment)) +
-  geom_line(linewidth = geom_linewidth) + # 绘制均值折线
-  geom_point(shape=21, size = 2, fill=NA, stroke = geom_linewidth) + # 可选：在均值位置添加点
+  geom_line(linewidth = geom_linewidth) + 
+  geom_point(shape=21, size = 2, fill=NA, stroke = geom_linewidth) + 
   geom_errorbar(aes(ymin = Mean - SE, 
-                    ymax = Mean + SE), # 设置误差棒范围（均值±1SE）
+                    ymax = Mean + SE), 
                 width = 0.2, 
-                linewidth = geom_linewidth) + # width控制误差棒宽度
+                linewidth = geom_linewidth) +
   labs(y = "Lantency to platform (s)") +
   scale_fill_manual(values = group.fill) + 
   scale_color_manual(values = group.stroke) + 
@@ -1112,28 +1109,27 @@ data.long$treatment <- factor(data.long$treatment,
                          levels=names(group.fill), 
                          ordered=T)
 
-# 计算每个时间点、每个组的均值、标准差、标准误和置信区间
 df_summary <- data.long %>%
   group_by(time, treatment) %>%
   summarise(
-    Mean = mean(value, na.rm = TRUE), # 均值
-    SD = sd(value, na.rm = TRUE), # 标准差
-    N = n(), # 每个组的观测数
-    SE = SD / sqrt(N), # 标准误
-    CI_lower = Mean - 1.96 * SE, # 95%置信区间下限 (简单近似)
-    CI_upper = Mean + 1.96 * SE, # 95%置信区间上限
-    .groups = 'drop' # 完成分组计算
+    Mean = mean(value, na.rm = TRUE), 
+    SD = sd(value, na.rm = TRUE), 
+    N = n(), 
+    SE = SD / sqrt(N), 
+    CI_lower = Mean - 1.96 * SE, 
+    CI_upper = Mean + 1.96 * SE, 
+    .groups = 'drop'
   )
 
 # df_summary
 
 p <- ggplot(df_summary, aes(x = time, y = Mean, color = treatment, group = treatment)) +
-  geom_line(linewidth = geom_linewidth) + # 绘制均值折线
-  geom_point(shape=21, size = 2, fill=NA, stroke = geom_linewidth) + # 可选：在均值位置添加点
+  geom_line(linewidth = geom_linewidth) + 
+  geom_point(shape=21, size = 2, fill=NA, stroke = geom_linewidth) + 
   geom_errorbar(aes(ymin = Mean - SE, 
-                    ymax = Mean + SE), # 设置误差棒范围（均值±1SE）
+                    ymax = Mean + SE), 
                 width = 0.2, 
-                linewidth = geom_linewidth) + # width控制误差棒宽度
+                linewidth = geom_linewidth) + 
   labs(y = "Lantency to platform (s)") +
   scale_fill_manual(values = group.fill) + 
   scale_color_manual(values = group.stroke) + 
@@ -1470,7 +1466,6 @@ CT <- "Micro"
 label <- "anno.L2"
 data <- data.frame()
 
-# 获取特定细胞类型在三个比较组合中的统计结果。
 for (pair in pairs) {
   S1 <- pair[1]
   S2 <- pair[2]
@@ -1999,23 +1994,19 @@ C1qa.AD_vs_WT.agg <- C1qa.AD_vs_WT %>%
 
 C1qa.PL_vs_AD <- gobj.meta %>%
   filter(treatment != "WTCtrl") %>%
-  # 按treatment、batch、cell_types计算均值
   group_by(treatment, batch, cell_types) %>%
   summarise(
     C1qa = mean(C1qa, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  # 将AD和WT转为宽格式
   pivot_wider(
     names_from = treatment,
     values_from = c(C1qa),
     names_sep = "."
   ) %>%
-  # 计算衍生指标
   mutate(
     C1qa.FC.PL = PLX5622/ FADCtrl
   ) %>%
-  # 过滤特定细胞类型
   filter(!cell_types %in% c("C12", "Lateral Ventricle", "Third Ventricle"))
 
 # write.csv(C1qa.PL_vs_AD, "001Giotto_out/Abeta_and_depletion_rate/C1qa.PL_vs_AD.csv")
@@ -2050,7 +2041,7 @@ mycolorcode = c("Isocortex"="#666666",
                 "Striatum"="#B3DE69")
 
 
-# 使用facet。
+# use facet
 colnames(C1qa.AD_vs_WT.agg) <- c("cell_types", "FC", "FC_sem", "Abeta_index.AD", "Abeta_index.AD_sem")
 colnames(C1qa.PL_vs_AD.agg) <- c("cell_types", "FC", "FC_sem", "Abeta_index.AD", "Abeta_index.AD_sem")
 C1qa.AD_vs_WT.agg$comparison <- "5xFAD-CTRL vs WT-CTRL"
@@ -2058,8 +2049,8 @@ C1qa.PL_vs_AD.agg$comparison <- "5xFAD-PLX vs 5xFAD-CTRL"
 
 c1qa.agg <- rbind(C1qa.AD_vs_WT.agg, C1qa.PL_vs_AD.agg)
 
-# 左右布局
-# 为了统一point的大小为2，使用geom_point而不是geom_pointrange. 
+# horizontal distribution
+# To ensure a consistent point size of 2, use geom_point instead of geom_pointrange.
 p <- ggplot(c1qa.agg, aes(Abeta_index.AD, FC)) + 
   # geom_pointrange(aes(ymin=FC-FC_sem, 
   #                     ymax=FC+FC_sem, 
@@ -2070,8 +2061,8 @@ p <- ggplot(c1qa.agg, aes(Abeta_index.AD, FC)) +
   geom_point(aes(color=cell_types), shape=21, size = 2, fill=NA, stroke = geom_linewidth) + # 可选：在均值位置添加点
   geom_errorbar(aes(ymin = FC-FC_sem, 
                     ymax = FC+FC_sem, 
-                    color=cell_types), # 设置误差棒范围（均值±1SE）
-                width = 0.2, # width控制误差棒宽度
+                    color=cell_types), 
+                width = 0.2, 
                 linewidth = geom_linewidth) + 
   stat_cor(method = "pearson", label.x.npc = "left", label.y.npc = "top", size=signif_textsize) + 
   scale_color_manual(name="Brain Region", values = mycolorcode) + 
@@ -2583,8 +2574,6 @@ ggsave("publish_new/Fig5d.png", pall, width=5.96, height=3.43,
 
 ## Fig. 5g: Aβ index \~ P2ry12, Trem2
 
-更新：调整排版。fig5e title放到y axis，legend放到底部，让5e头部可以和左边对齐。
-
 ```{r}
 # fig. 5e ----
 
@@ -2621,11 +2610,11 @@ if (F) {
   
   for (i in c("main", "alt")) {
     if (i == "main") {
-      p <- p + geom_point(shape=21, fill=NA, alpha=.3)# 不加标签。
-      ggsave("publish/Fig5e.pdf", p, width=2.6776, height=4.6179, device=cairo_pdf) # 放大。
+      p <- p + geom_point(shape=21, fill=NA, alpha=.3)
+      ggsave("publish/Fig5e.pdf", p, width=2.6776, height=4.6179, device=cairo_pdf) 
       ggsave("publish/Fig5e.png", p, width=2.6776, height=4.6179, dpi=300)
     } else {
-      p <- p + stat_cor(size=9 * 0.35278) # 加标签不加点。
+      p <- p + stat_cor(size=9 * 0.35278) 
       ggsave("publish/Fig5e.alt.pdf", p, width=2.3175, height=3.6388, device=cairo_pdf)
       ggsave("publish/Fig5e.alt.png", p, width=2.3175, height=3.6388, dpi=300)
     }
@@ -2659,7 +2648,7 @@ for (Gene in c("Trem2", "P2ry12")) {
 
 p <- p.list[[1]] / p.list[[2]]
 
-ggsave("publish_new/Fig5e.pdf", p, width=2.5, height=4.6179, device=cairo_pdf) # 放大。
+ggsave("publish_new/Fig5e.pdf", p, width=2.5, height=4.6179, device=cairo_pdf) 
 ggsave("publish_new/Fig5e.png", p, width=2.5, height=4.6179, dpi=300)
 
 ```
@@ -2730,619 +2719,145 @@ Previously generated with shinyapp, might need adjustment now.
 
 
 library(reshape2)
-
-
 library(pheatmap)
-
-
 library(RColorBrewer)
 
-
-
-
-
 spot.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
-
-
 cell.DEGs <- read.csv("../002SC/004Seurat_out/002cell_type_anno/anno.L1.FindAllMarkers.csv", row.names=1)
 
-
-
-
-
-# --- 0. Read data and define order (unchanged) ---
-
-
 Abeta.merged <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/delta_Abeta.csv", row.names=1)
-
-
 br.order <- rev(Abeta.merged$brain_region)
-
-
 br.order <- br.order[!grepl("Ventricle", br.order)]
-
-
-
-
-
-# --- 1. Prepare data ---
-
-
-# Assume cell.DEGs and spot.DEGs already exist in the environment
-
-
-
 
 
 only_PL_vs_AD <- TRUE
 
-
-
-
-
 mgi_db <- readxl::read_excel("C:/Users/a8799/Desktop/database/MGI/GO0006119.xlsx")
 
-
-
-
-
 st.DEGs <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.csv", row.names=1)
-
-
 st.DEGs.sub <- subset(st.DEGs, comparison == "PLX5622_vs_FADCtrl")
-
-
 st.DEGs.up <- subset(st.DEGs.sub, avg_log2FC > 0)
-
-
 st.DEGs.down <- subset(st.DEGs.sub, avg_log2FC < 0)
-
-
-
-
 
 rescued.df <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.rescued.csv", row.names=1)
 
-
-
-
-
 df <- data.frame(gene=unique(mgi_db$Symbol), class="ns")
-
-
 df$class[df$gene %in% st.DEGs.up$gene] <- "up"
-
-
 df$class[df$gene %in% st.DEGs.down$gene] <- "down/up_down"
-
-
-
-
 
 df$respon <- ifelse(df$class=="ns", "non-responsive", "responsive")
 
-
-
-
-
 sub_dat <- subset(spot.DEGs, gene %in% df$gene[df$respon == "responsive"] & 
-
-
                   comparison %in% c("FADCtrl_vs_WTCtrl", "PLX5622_vs_FADCtrl"))
 
-
-
-
-
-# [Modification 1]: Ensure brain region list is sorted by br.order, not alphabetically.
-
-
-# Crucial: take intersection to keep only existing regions while maintaining br.order.
-
-
 available_regions <- unique(sub_dat$brain_region)
-
-
 sorted_regions <- br.order[br.order %in% available_regions]
 
-
-
-
-
 if (only_PL_vs_AD) {
-
-
   all_genes <- unique(subset(sub_dat, comparison == "PLX5622_vs_FADCtrl")$gene)
-
-
 } else {
-
-
   all_genes <- unique(sub_dat$gene)
-
-
 }
-
-
-
-
-
-
-
-
-# --- 2. Matrix extraction function (fine-tuned for sorting) ---
-
 
 get_matrix <- function(comp_name) {
-
-
   tmp <- dcast(subset(sub_dat, comparison == comp_name), 
-
-
                gene ~ brain_region, value.var = "avg_log2FC", fill = 0)
-
-
   rownames(tmp) <- tmp$gene
-
-
   tmp <- tmp[, -1]
-
-
   
-
-
-  # Initialize matrix
-
 
   res <- matrix(0, nrow = length(all_genes), ncol = length(sorted_regions), 
-
-
                 dimnames = list(all_genes, sorted_regions)) 
-
-
   
-
-
   common_g <- intersect(rownames(tmp), all_genes)
-
-
   common_r <- intersect(colnames(tmp), sorted_regions)
-
-
   
-
-
   if(length(common_g) > 0 && length(common_r) > 0){
-
-
     res[common_g, common_r] <- as.matrix(tmp[common_g, common_r])
-
-
   }
-
-
   
-
-
-  # [Modification 1 Core]: Force reorder by sorted_regions
-
-
   res <- res[, sorted_regions, drop=FALSE]
-
-
   return(res)
-
-
 }
 
-
-
-
-
 mat_AD <- get_matrix("FADCtrl_vs_WTCtrl")
-
-
 mat_PL <- get_matrix("PLX5622_vs_FADCtrl")
-
-
-
-
-
-# --- 3. Merge and process column names ---
-
-
-
-
 
 mat_final <- cbind(mat_AD, mat_PL)
 
-
-
-
-
-# Force modify column names to make them unique
-
-
 colnames(mat_final) <- c(paste0("AD_", sorted_regions), paste0("PL_", sorted_regions))
-
-
 sorted_regions.renamed <- sub("Olfactory area", "Olfactory cortical area", sorted_regions)
 
 
-
-
-
-# --- 4. Scale (Vectorized method) ---
-
-
 row_max <- apply(abs(mat_final), 1, max)
-
-
-# Prevent division by zero
-
-
 row_max[row_max == 0] <- 1 
-
-
 mat_scaled <- mat_final / row_max
 
 
-
-
-
-# --- 5. Pre-calculate clustering for Cluster labels (Modifications 2 & 3) ---
-
-
-
-
-
-# To get specific cluster numbers (1-6), perform hierarchical clustering before plotting
-
-
-# Calculate distance and clustering tree
-
-
 gene_dist <- dist(mat_scaled, method = "euclidean")
-
-
 gene_hclust <- hclust(gene_dist, method = "complete")
-
-
-
-
-
-# Cut genes into 6 categories
-
 
 gene_clusters <- cutree(gene_hclust, k = 6)
 
-
-
-
-
-# Sort matrix by clustering results
-
-
 mat_scaled <- mat_scaled[gene_hclust$order, ]
-
-
-
-
-
-# Build row annotation data frame (Row Annotation)
-
-
-# This adds a color bar on the left with a legend for clusters
-
-
-# anno_row <- data.frame(Cluster = factor(paste0("Cluster ", gene_clusters)))
-
-
-# rownames(anno_row) <- rownames(mat_scaled)
-
-
-
-
-
-# rescued genes annotation
-
 
 st.DEGs.rescued <- read.csv("../001ST/001Giotto_out/003DEGs/wilcox/st.DEGs.rescued.csv", row.names=1)
 
-
-
-
-
-# Group by gene and concatenate directions using dplyr
-
-
 library(dplyr)
-
-
 result <- st.DEGs.rescued %>%
-
-
   group_by(gene) %>%
-
-
   summarise(direction = paste(unique(direction), collapse = ","))
 
-
-
-
-
-# Remove brain regions with conflicting results
-
-
 result2 <- subset(result, direction=="down rescued" | direction=="up rescued")
-
-
 result2 <- data.frame(result2)
-
-
 row.names(result2) <- result2$gene
 
-
-
-
-
 anno_row <- data.frame(Rescued=result2[rownames(mat_scaled), "direction"], row.names=rownames(mat_scaled))
-
-
 anno_row$Rescued[is.na(anno_row$Rescued)] <- "None"
-
-
-
-
-
-# --- 6. Plot preparation ---
-
-
-
-
-
-# Column Annotation
-
-
-# anno_col <- data.frame(Group = factor(rep(c("AD vs WT", "PL vs AD"), each = length(sorted_regions)),
-
-
-#                                       levels = c("AD vs WT", "PL vs AD")))
-
-
-# rownames(anno_col) <- colnames(mat_scaled)
-
-
-
-
-
-# Color settings
-
-
-# Automatically assign colors for 6 Clusters, or specify manually
-
-
-# cluster_colors <- brewer.pal(6, "Set2")
-
-
-# names(cluster_colors) <- paste0("Cluster ", 1:6)
-
-
-
-
-
-# anno_colors <- list(
-
-
-#   Group = c("AD vs WT"="#E69F00", "PL vs AD"="#56B4E9"),
-
-
-#   Cluster = cluster_colors 
-
-
-# )
-
-
-
-
 
 anno_colors <- list(Rescued=c("None"="grey", "up rescued"="red", "down rescued"="blue"))
 
-
-
-
-
-# Main panel color settings
-
-
 my_colors <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
 
-
-
-
-
-# --- 7. Final plotting ---
-
-
 p <- pheatmap(mat_scaled,
-
-
-         # Row clustering settings
-
-
-         # cluster_rows = gene_hclust,    # Use pre-calculated tree
-
-
          cluster_rows = F, 
-
-
-         # cutree_rows = 6,               # [Modification 2]: Divide rows into 6 categories and add gaps
-
-
-         
-
-
-         # Column clustering settings
-
-
-         cluster_cols = FALSE,          # [Modification 1]: Disable column clustering to follow sorted_regions
-
-
-         
-
-
-         # Colors and breaks
-
-
+         cluster_cols = FALSE, 
          color = my_colors, 
-
-
          breaks = seq(-1, 1, length.out = 101), 
-
-
-         
-
-
-         # Annotation
-
-
-         # annotation_col = anno_col,
-
-
          annotation_row = anno_row, 
-
-
          annotation_legend = FALSE, 
-
-
          annotation_colors = anno_colors,
-
-
-         
-
-
-         # Gap settings
-
-
-         gaps_col = length(sorted_regions), # Add gap between comparisons
-
-
-         
-
-
-         # Label settings
-
-
-         labels_col = rep(sorted_regions.renamed, 2), # Use original brain region names
-
-
-         show_rownames = T,         # Show row names
-
-
-         
-
-
+         gaps_col = length(sorted_regions), 
+         labels_col = rep(sorted_regions.renamed, 2),
+         show_rownames = T, 
          main = paste0("Transcriptional alterations of PLX-responsive \nOXPHOS genes across comparisons"),  
-
-
-         #  border_color = NA, 
-
-
-         # fontsize=7, 
-
-
          fontsize_row=8, 
-
-
          fontsize_col=8, 
-
-
          silent = T
-
-
 )
 
-
-
-
-
-# Modify font to italic
-
-
 library(grid)
-
-
 idx <- grep("row_names", p$gtable$layout$name)
-
-
 p$gtable$grobs[[idx]]$gp <- gpar(fontface = "italic", fontsize=8)
 
-
-
-
-
 idx <- grep("main", p$gtable$layout$name)
-
-
 p$gtable$grobs[[idx]]$gp <- gpar(fontsize=8)
 
-
-
-
-
-
-
-
 width=3.68
-
-
 height=6
 
-
-
-
-
-# Plot PDF
-
-
 out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/OXPHOS_ST_DEGs_heatmap.pdf")
-
-
 cairo_pdf(out.path, width, height, family = "Arial")
-
-
 grid.newpage()
-
-
 grid.draw(p$gtable)
-
-
 dev.off()
-
-
-
-
-
-# Solve 'Arial font family not found in Windows database' issue by adding windowsFonts line.
-
 
 windowsFonts(Arial = windowsFont("Arial")) 
-
-
 out.path <- paste0("../001ST/001Giotto_out/003DEGs/wilcox/OXPHOS_ST_DEGs_heatmap.png")
-
-
 png(out.path, width, height, family = "Arial", units = "in", res=300)
-
-
 grid.newpage()
-
-
 grid.draw(p$gtable)
-
-
 dev.off()
-
 
 ```
 
@@ -5125,9 +4640,9 @@ for (i in i.seq) {
 
 ```
 ##---
-## Fig. S4 a 免疫荧光图像示例
+## Fig. S4 a Example of an immunofluorescence image
 
-从之前的PPT里面抠下来的，或许需要进一步处理。
+This image was extracted from a previous PowerPoint presentation and may require further processing.
 
 参考："C:\Users\a8799\Desktop\project\2022-10-14_mouse_spatial\subprojects\2023-07-05_image_analysis\Chuhao_Li_2023-08-16_荧光图像分析.pptx"
 
@@ -5732,9 +5247,9 @@ paste0("Notably, microglial depletion upregulated the expression of ", length(mt
 [1] "Notably, microglial depletion upregulated the expression of 12 mtOXPHOS genes, representing 85.71% of the 14 human mitochondrial protein-coding genes (Fig. 6b)."
 ```
 
-# 备用图片
+# Backup Image
 
-## Fig. S 人类Oligo比例
+## Fig. S Human Oligo Proportions
 
 ```{r}
 
@@ -5770,7 +5285,7 @@ ggsave("../002SC/human_oligo/Oligo_Human.Prop_test.png", p, width=3.23, height=5
 ```
 
 
-## Fig. S 氧化磷酸化基因数目
+## Fig. S Number of oxidative phosphorylation genes
 
 ```{r}
 
@@ -5791,13 +5306,13 @@ length(unique(subset(df.rescued, PLX5622_vs_FADCtrl < 0)$gene)) # 247
 # 92 rescued genes were upregulated in 5xFAD-PLX mice compared with 5xFAD-CTRL mice.
 length(unique(subset(df.rescued, PLX5622_vs_FADCtrl > 0)$gene)) # 92
 
-# 氧化磷酸化通路基因？
-# 1. GO通路。
+# Genes involved in the oxidative phosphorylation pathway?
+# 1. GO pathway。
 # 2. MitoCarta3.0
 
-# 如何获取属于特定GO号的小鼠基因symbol？
+# How to obtain mouse gene symbols belonging to a specific GO number?
 
-# 下载与MGI。在GO browser里面搜索GO:0006119，导出为excel表格。
+# Download and MGI. Search for GO:0006119 in GO browser and export it as an Excel spreadsheet.
 oxphos.df <- readxl::read_excel("C:\\Users\\a8799\\Desktop\\database\\MGI\\GO_term_summary_20260126_124139.xlsx")
 oxphos.list <- unique(oxphos.df$Symbol)
 
@@ -5809,7 +5324,7 @@ length(unique(degs.oxphos$gene)) # 57
 
 rescued.oxphos <- subset(df.rescued, gene %in% oxphos.list)
 length(unique(rescued.oxphos$gene)) # 23
-# 请根据基因所属的蛋白复合物对下面的基因进行分类：
+# Please classify the following genes according to the protein complex to which they belong:
 # "Chchd2"  "Cox6a1"  "Cox6c"   "Cox7c"   "Cox8a"   "mt-Atp6" "mt-Atp8" "mt-Co1"  "mt-Co2"  "mt-Co3"  "mt-Cytb" "mt-Nd1"  "mt-Nd2"  "mt-Nd3"  "mt-Nd4"  "mt-Nd4l" "mt-Nd5"  "Ndufa11" "Ndufa3"  "Ndufa5"  "Ndufb4"  "Uqcr11"  "Uqcrb" 
 
 # setdiff(degs.oxphos$gene, rescued.oxphos$gene)
@@ -5843,9 +5358,7 @@ out.df2 <- responsive.oxphos %>% group_by(brain_region) %>% summarise(n_rescued_
 
 ```
 
-## Fig. 7 Ext. GABA SN DEGs火山图(AD vs WT)
-
-加上灰色点。
+## Fig. 7 Ext. GABA SN DEGs vocanoPlot (AD vs WT)
 
 ```{r}
 library(DESeq2)
@@ -5864,7 +5377,7 @@ paste(up$gene[!grepl("^Gm|Rik$", up$gene)], collapse=", ")
 down <- subset(df.sub, log2FoldChange < 0)
 paste(down$gene[!grepl("^Gm|Rik$", down$gene)], collapse=", ")
 
-# 我们对5xFAD小鼠和野生型小鼠都进行了单核测序，把两个分组的GABA能神经元进行了比较，鉴定到这些上调表达基因：Thy1, Ano2, Meis2, Hpgds, Apoe, St8sia3os, Epyc, Lilrb4a, Itgbl1, Lrtm1, Slc24a4, Muc15, Glp2r, Inhba, Pifo, Vmn2r2, Itga11，以及这些下调表达基因：Tfap2b, Rmst, Chrm2。请问如何解释这个结果？
+# We performed single-nucleus sequencing on both 5xFAD and wild-type mice, comparing GABAergic neurons from the two groups. We identified the following upregulated genes: Thy1, Ano2, Meis2, Hpgds, Apoe, St8sia3os, Epyc, Lilrb4a, Itgbl1, Lrtm1, Slc24a4, Muc15, Glp2r, Inhba, Pifo, Vmn2r2, Itga11, and the following downregulated genes: Tfap2b, Rmst, Chrm2. How can we interpret these results?
 
 df.sub$direction <- ifelse(df.sub$log2FoldChange > 0, yes = "up", no = "down")
 df.sub$gene <- row.names(df.sub)
@@ -5875,7 +5388,7 @@ interested_genes <- c("Thy1", "Slc24a4", "Rmst", "Glp2r", "Itgbl1",
                       "Itga11", "Ano2", "Meis2", "Apoe", "Hpgds", 
                       "Tfap2b", "Chrm2")
 
-# 筛选标准：
+# Screening criteria：
 min(abs(df.sub$log2FoldChange))
 # [1] 0.4954564
 # abs(lfc) > 0.4
@@ -5895,15 +5408,15 @@ p <- p + geom_text_repel(
   data = subset(df.sub, gene %in% interested_genes),
   aes(label = gene), 
   size = 7 * 0.35278,
-  box.padding = 0.5,   # 标签周围的填充
-  point.padding = 0.3,  # 点周围的填充
-  min.segment.length = 0.2,  # 最小线段长度
-  max.overlaps = Inf,   # 最大重叠数（Inf表示不限制）
-  segment.color = "grey50",  # 连接线颜色
-  segment.size = 0.5,   # 连接线粗细
-  direction = "both",   # 标签可以出现在点的两侧
-  nudge_x = 0.2,       # x方向微调
-  nudge_y = 0.2        # y方向微调
+  box.padding = 0.5,   
+  point.padding = 0.3,  
+  min.segment.length = 0.2,  
+  max.overlaps = Inf,   
+  segment.color = "grey50",  
+  segment.size = 0.5,   
+  direction = "both",   
+  nudge_x = 0.2,      
+  nudge_y = 0.2       
 )
 
 ggsave("publish_new/fig7.SN_pseudobulk_DEGs_vocano.AD_vs_WT.GABA.pdf", p, width=3.413, height=2.657, device = cairo_pdf)
@@ -5915,7 +5428,7 @@ ggsave("publish_new/fig7.SN_pseudobulk_DEGs_vocano.AD_vs_WT.GABA.png", p, width=
 knitr::include_graphics("publish_new/fig7.SN_pseudobulk_DEGs_vocano.AD_vs_WT.GABA.png")
 ```
 
-## 人和小鼠比较
+## Human vs. mouse
 
 ```{r}
 # 
@@ -5923,7 +5436,7 @@ knitr::include_graphics("publish_new/fig7.SN_pseudobulk_DEGs_vocano.AD_vs_WT.GAB
 df.metascape <- read.csv("C:/Users/a8799/Desktop/project/2022-10-14_mouse_spatial/PLX5622/data/st/003/enrich/PLX5622_vs_FADCtrl.GO_AllLists.csv")
 
 # lfc 0.3, PL vs AD: 
-# 氧化磷酸化：GO:0006119
+# Oxidative phosphorylation: GO:0006119
 enriched.genes <- subset(df.metascape, GO == "GO:0006119", select = "Hits", drop=T)
 enriched.genes <- strsplit(enriched.genes, "|", fixed=T)
 enriched.genes <- unique(unlist(enriched.genes))
@@ -5942,7 +5455,7 @@ writeLines(enriched.genes)
 # ND4
 # Ndufb1
 
-# 糖酵解：mmu00010
+# Glycolysis：mmu00010
 # Ldha
 # Pkm
 # Tpi1
@@ -5958,7 +5471,7 @@ enriched.genes <- unique(unlist(enriched.genes))
 paste(enriched.genes, collapse=", ")
 # Atp5me, Cox6a1, Cox6c, Cox7c, Cox8a, ATP6, ATP8, COX1, COX2, COX3, CYTB, ND1, ND2, ND3, ND4, ND4L, ND5, Ndufa3, Cox7b, Uqcr11, Ndufb4, Ndufa5, Cox6b1, Ndufb1, Uqcrb, ND6, Ndufa1, Ndufa11, Atp5pd, Ndufv2
 
-# 糖酵解：mmu00010, WP157
+# Glycolysis: mmu00010, WP157
 enriched.genes <- subset(df.metascape, GO %in% c("mmu00010", "WP157"), select = "Hits", drop=T)
 enriched.genes <- strsplit(enriched.genes, "|", fixed=T)
 glycolysis.genes <- unique(unlist(enriched.genes))
@@ -5971,16 +5484,16 @@ df.AD_wT.sub <- enriched.genes <- subset(df.AD_WT, GO == "GO:0006119")
 
 df.AD_wT.sub <- enriched.genes <- subset(df.AD_WT, GO %in% c("mmu00010", "WP157"))
 
-# 检查PL vs AD下调的糖酵解通路的基因在AD vs WT的变化情况
+# Examine the changes in genes downregulated in the glycolysis pathway in PL vs AD in AD vs WT
 
 st.DEGs <- read.csv("data/st.DEGs.csv", row.names=1)
 subset(st.DEGs, gene %in% glycolysis.genes & comparison == "PLX5622_vs_FADCtrl")
 subset(st.DEGs, gene %in% glycolysis.genes & comparison == "FADCtrl_vs_WTCtrl")
 
-# Pkm, Eno2在AD vs WT上调。
+# Pkm, Eno2 is increased in AD vs WT.
 ```
 
-# 附表
+# supplementary tables
 
 ## cell count Level 1
 
@@ -6061,9 +5574,7 @@ paste0("004Seurat_out/002cell_type_anno/cluster.L3/", ct, ".marker.csv")
 
 ## rescued genes table
 
-gene name, up/down, brain_region(log2fc), 其他注释信息
-
-参考：C:/Users/a8799/Desktop/project/2022-10-14_mouse_spatial/PLX5622/003ST_DEGs_spot.Rmd### DEGs热图绘制
+gene name, up/down, brain_region(log2fc), Other annotation information
 
 ```{r}
 
@@ -6073,41 +5584,32 @@ st.DEGs <- subset(st.DEGs, ! brain_region %in% c("Third Ventricle", "Lateral Ven
 st.DEGs <- subset(st.DEGs, comparison != "PLX5622_vs_WTCtrl")
 
 library(reshape2)
-# 筛选出rescued genes
 df <- dcast(gene + brain_region ~ comparison, value.var = "avg_log2FC", data=st.DEGs)
 df <- na.omit(df)
 df.rescued <- subset(df, FADCtrl_vs_WTCtrl * PLX5622_vs_FADCtrl < 1)
 
 
-# 构建lfc表格
 library(pheatmap)
 library(RColorBrewer)
 
-# --- 0. 读取数据与定义顺序 (保持不变) ---
 Abeta.merged <- read.csv("../001ST/001Giotto_out/010immunofluorescence/merged/delta_Abeta.csv", row.names=1)
 br.order <- rev(Abeta.merged$brain_region)
 br.order <- br.order[!grepl("Ventricle", br.order)]
 
-# --- 1. 准备数据 ---
-# 假设 cell.DEGs 和 spot.DEGs 已经在环境中存在
 
 sub_dat <- subset(st.DEGs, gene %in% df.rescued$gene)
 
-# [修改点 1]: 确保脑区列表是按照 br.order 排序的，而不是字母顺序
-# 这一步非常关键，先取交集，确保只保留数据中存在的脑区，同时保持 br.order 的顺序
 available_regions <- unique(sub_dat$brain_region)
 sorted_regions <- br.order[br.order %in% available_regions]
 
 all_genes <- unique(sub_dat$gene)
 
-# --- 2. 矩阵提取函数 (微调以适应排序) ---
 get_matrix <- function(comp_name) {
   tmp <- dcast(subset(sub_dat, comparison == comp_name), 
                gene ~ brain_region, value.var = "avg_log2FC", fill = 0)
   rownames(tmp) <- tmp$gene
   tmp <- tmp[, -1]
   
-  # 初始化矩阵
   res <- matrix(0, nrow = length(all_genes), ncol = length(sorted_regions), 
                 dimnames = list(all_genes, sorted_regions)) # 注意这里用了 sorted_regions
   
@@ -6118,7 +5620,6 @@ get_matrix <- function(comp_name) {
     res[common_g, common_r] <- as.matrix(tmp[common_g, common_r])
   }
   
-  # [修改点 1 核心]: 强制按照 sorted_regions 重排列
   res <- res[, sorted_regions, drop=FALSE]
   return(res)
 }
@@ -6126,47 +5627,14 @@ get_matrix <- function(comp_name) {
 mat_AD <- get_matrix("FADCtrl_vs_WTCtrl")
 mat_PL <- get_matrix("PLX5622_vs_FADCtrl")
 
-# --- 3. 合并并处理列名 ---
 
 mat_final <- cbind(mat_AD, mat_PL)
 
-# 强制修改列名，使其唯一
 colnames(mat_final) <- c(paste0("AD_", sorted_regions), paste0("PL_", sorted_regions))
 
 mat_final <- mat_final[gene_hclust$order, ]
 
 write.csv(mat_final, "publish_new/tab5.csv")
 
-# 手动调整格式，保存为publish_new/tab5.xlsx
+# adjust format and save to publish_new/tab5.xlsx
 ```
-
-# Common Tips
-
-## facet or position_dodge
-I want to submit to Nature series journals and am preparing statistical charts. When drawing grouped bar charts, is it more consistent with journal requirements to use position = position_dodge() or facet?
-
-The position_dodge method is a bit troublesome:
-1. Data points, error bars, and statistical marks all need to be adjusted accordingly. Jitter for data points doesn't seem to have a parameter for parallel adjustment yet. Statistical marks especially feel like they need manual operation.
-2. Side-by-side groups are combined rather than separated within a group.
-
-It's better to use facet and then adjust.
-
-## y-axis scale
-I want to submit to Nature series journals and am preparing statistical charts. When numerical values on the y-axis for continuous data are large, how is it appropriate to represent the scale? Show all digits, use scientific notation, or other methods?
-
-## mm or pt
-The default unit for the size parameter of geom_pointrange geometric objects is millimeters (mm).
-
-geom_signif: use textsize to adjust font size, and size to adjust line thickness.
-
-stat_compare_means: use size to adjust font size, and bracket.size to adjust line thickness.
-
-pt to mm conversion: Some geoms use mm by default. To specify a 9 pt font size, enter size = 9 * 0.35278.
-
-Controlling image size adjustment: First measure the drawing area (in inches) using the rectangle tool in AI, then specify the size in ggsave. This avoids unifying font sizes after importing to AI.
-
-Quickly optimize code format: RStudio Menu Bar -> Code -> reformat selection (ctrl + shift + a).
-
-Multiple similar statistical charts appear in my article, each requiring a unified style. These styles often need adjustment; every time, the R code for all charts must be adjusted, which is troublesome. Is there a method similar to a ggplot theme function that can make these styles into a function, which each chart calls, so I only need to change the style function later?
-
-When using ggplot's facet_wrap for plotting, I pass the facet_wrap(scale = "free_y") layer. I want to keep the y-axis scale unchanged while keeping the number of y-axis ticks consistent. How to do it?
